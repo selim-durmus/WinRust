@@ -49,7 +49,7 @@ Every change is reversible: uninstall puts back the values that were there befor
 
 ## Styles
 
-The gear at the left end of the bar opens **Style**. The choice applies at once to the bar, the file manager (rust-explorer) and the search window (Alt+Space):
+Right-click an empty spot on the bar and pick **Bar style…** to open **Style**. The choice applies at once to the bar, the file manager (rust-explorer) and the search window (Alt+Space):
 
 | Style | Look |
 |---|---|
