@@ -39,13 +39,40 @@ fn send(keys: &[INPUT]) {
     unsafe { SendInput(keys.len() as u32, keys.as_ptr(), size_of::<INPUT>() as i32) };
 }
 
-/// Win+E: rust-explorer from the user's own folder (where updates land without admin), else next to us, else Explorer.
+/// The program in a shell command line: "\"C:\\Program Files\\FilePilot\\FPilot.exe\" \"%1\"" -> C:\Program Files\FilePilot\FPilot.exe.
+fn command_exe(cmd: &str) -> Option<&str> {
+    let c = cmd.trim();
+    let exe = match c.strip_prefix('"') {
+        Some(rest) => rest.split('"').next()?,
+        None => c.split_whitespace().next()?,
+    };
+    (!exe.is_empty()).then_some(exe)
+}
+
+/// The file manager the user set to open folders (HKCU\Software\Classes\Directory\shell\open\command, the way File Pilot,
+/// Directory Opus or rust-explorer register themselves), unless it is Explorer or is gone.
+fn folder_handler() -> Option<std::path::PathBuf> {
+    let key: Vec<u16> = "Software\\Classes\\Directory\\shell\\open\\command\0".encode_utf16().collect();
+    let mut buf = vec![0u16; 1024];
+    let mut len = (buf.len() * 2) as u32;
+    let r = unsafe { RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), std::ptr::null(), RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut len) };
+    if r != 0 {
+        return None;
+    }
+    let s = String::from_utf16_lossy(&buf[..(len as usize / 2).saturating_sub(1)]);
+    let exe = std::path::PathBuf::from(command_exe(&s)?);
+    let name = exe.file_name()?.to_string_lossy().to_lowercase();
+    (name != "explorer.exe" && exe.is_file()).then_some(exe)
+}
+
+/// Win+E: the user's folder handler (File Pilot...), else rust-explorer from the user's own folder (where updates land
+/// without admin) or next to us, else Explorer.
 /// Null std handles: this process has no console (FreeConsole) and a child that inherits the invalid ones fails to start.
 fn open_files() {
     use std::{path::PathBuf, process::{Command, Stdio}};
     let mine = std::env::var_os("LOCALAPPDATA").map(|b| PathBuf::from(b).join(r"plugin-launcher\bin\rust-explorer.exe"));
     let beside = std::env::current_exe().ok().map(|e| e.with_file_name("rust-explorer.exe"));
-    let exe = [mine, beside].into_iter().flatten().find(|p| p.exists()).unwrap_or_else(|| "explorer.exe".into());
+    let exe = folder_handler().or_else(|| [mine, beside].into_iter().flatten().find(|p| p.exists())).unwrap_or_else(|| "explorer.exe".into());
     let _ = Command::new(exe).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
 }
 
@@ -112,6 +139,14 @@ pub fn run() -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn exe_of_a_command_line() {
+        assert_eq!(super::command_exe(r#""C:\Program Files\FilePilot\FPilot.exe" "%1""#), Some(r"C:\Program Files\FilePilot\FPilot.exe"));
+        assert_eq!(super::command_exe(r"C:\Tools\fm.exe %1"), Some(r"C:\Tools\fm.exe"));
+        assert_eq!(super::command_exe("  "), None);
+        assert_eq!(super::command_exe(r#""""#), None);
+    }
+
     #[test]
     fn finds_index() {
         let ids = [[1u8; 16], [2; 16], [3; 16]].concat();
