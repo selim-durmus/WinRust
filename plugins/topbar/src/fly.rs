@@ -34,14 +34,6 @@ enum Act {
     CalToday,
     App(usize), // index into the filtered list
     Power(u8),  // 0 lock, 1 sleep, 2 restart, 3 shut down
-    Keyboard,   // the on-screen keyboard button in the Start search field
-}
-
-/// The touch keyboard (TabTip), else the classic on-screen keyboard. Windows opens it by itself only for the Explorer shell.
-fn touch_keyboard() {
-    let tip = std::env::var_os("CommonProgramFiles").map(|p| std::path::PathBuf::from(p).join(r"microsoft shared\ink\TabTip.exe"));
-    let exe = tip.filter(|p| p.is_file()).unwrap_or_else(|| "osk.exe".into());
-    let _ = std::process::Command::new(exe).spawn();
 }
 
 struct Net {
@@ -686,7 +678,6 @@ fn rects(k: Kind) -> Vec<(RECT, Act)> {
             let s = SCROLL.get();
             let mut v: Vec<_> = (0..ROWS).filter(|i| s + i < f.len()).map(|i| (r(12, 76 + 40 * i as i32, w - 12, 76 + 40 * (i as i32 + 1)), Act::App(s + i))).collect();
             v.extend((0..4u8).map(|i| (r(w - 16 - 4 * 44 + 44 * i as i32, h - 52, w - 16 - 4 * 44 + 44 * (i as i32 + 1) - 4, h - 12), Act::Power(i))));
-            v.push((r(w - 58, 24, w - 26, 52), Act::Keyboard)); // inside the search field, at its right end
             v
         }
     }
@@ -1144,7 +1135,6 @@ unsafe fn run_act(a: Act, rect: RECT, x: i32) {
             open(&wide(u));
             close();
         }
-        Act::Keyboard => touch_keyboard(), // the panel stays open: the keys go to its search field
         Act::CalPrev | Act::CalNext => {
             let (mut y, mut m) = CAL.get();
             m += if a == Act::CalNext { 1 } else { -1 };
@@ -1656,7 +1646,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
             SelectObject(dc, f_txt);
             let q = QUERY.with_borrow(|q| q.clone());
             // the search box: text, selection and caret, scrolled so the caret stays in view
-            let tb = r(64, 20, w - 64, 56);
+            let tb = r(64, 20, w - 36, 56); // up to the field's rounded right end (no keyboard button there any more)
             let chars: Vec<char> = q.chars().collect();
             let (caret, anchor) = CARET.get();
             let (caret, anchor) = (caret.min(chars.len()), anchor.min(chars.len()));
@@ -1683,12 +1673,6 @@ unsafe fn paint(hw: HWND, k: Kind) {
             let cx = tb.left + px(caret) - shift;
             fill(dc, RECT { left: cx, top: mid - sc(9), right: cx + sc(1).max(1), bottom: mid + sc(9) }, pal().text, 0); // caret
             RestoreDC(dc, saved);
-            if let Some((kr, ka)) = rects(k).into_iter().find(|(_, a)| *a == Act::Keyboard) {
-                g(ka, kr, card, mix(card, pal().text, 0.1), sc(14));
-                SelectObject(dc, f_glyph);
-                text(dc, "\u{E765}", kr, if hot(ka) { pal().text } else { pal().dim }, DT_CENTER); // keyboard
-                SelectObject(dc, f_txt);
-            }
             let f = filtered();
             if f.is_empty() {
                 if q.is_empty() {
