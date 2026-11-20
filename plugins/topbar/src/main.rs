@@ -88,7 +88,11 @@ const WARN: u32 = winrust_common::style::WARN;
 const CALLBACK: u32 = WM_APP + 1;
 const WM_MOUSELEAVE: u32 = 0x02A3; // not exported under the enabled features
 const NO_WINDOW: u32 = 0x0800_0000;
-const BAR_H: i32 = 40;
+// Windows 11 taskbar metrics (its XAML: MediumTaskbarButtonExtent 44, ControlLargeCornerRadius 4, RunningIndicator
+// Height 3): a 48 px bar, 44 px button slots side by side, a 40x40 highlight inset 2 / 4 px, a 24 px icon in the middle
+const BAR_H: i32 = 48;
+const BAR_H_THIN: i32 = 40; // the tiling style's status strip at the top
+const BTN_W: i32 = 44;
 // hit-test results. Buttons (Start, pins, windows) are >= 0 in left-to-right order; tray apps are TAPP + index.
 const NONE: i32 = -1;
 const SEARCH: i32 = -10;
@@ -222,7 +226,7 @@ fn sc(v: i32) -> i32 {
     (v as f32 * SCALE.get()) as i32
 }
 fn bar_h() -> i32 {
-    sc(BAR_H)
+    sc(if at_top() { BAR_H_THIN } else { BAR_H })
 }
 /// Screen y of the bar's top edge when it is in place (bottom of the primary monitor, or its top in the tiling style).
 unsafe fn bar_top() -> i32 {
@@ -1024,7 +1028,7 @@ unsafe fn lnk_icon(lnk: &[u16], target: &str) -> HICON {
 /// Size app icons are drawn at (24 logical px, like the Windows 11 taskbar). Icons are loaded at exactly this size:
 /// a 32 px icon stretched by DrawIconEx comes out jagged.
 fn icon_px() -> i32 {
-    sc(28) // app icons are loaded at this size (sharp), in squares of BAR_H - 4
+    sc(24) // as on the Windows 11 taskbar; app icons are loaded at this size (sharp)
 }
 
 /// Icon of a file, shortcut (its target's icon, no arrow) or shell item ("shell:AppsFolder\<app id>") rendered by the
@@ -1421,8 +1425,9 @@ fn layout(w: i32) -> Layout {
     let apps = (sys.0 - gap - sc(24) * tray_count() as i32, sys.0 - gap);
     let margin = (w - apps.0) + sc(8); // keep the button group centered and clear of both sides
     let n = BTNS.with_borrow(|b| b.len()) as i32 + 1; // + the search slot
-    // a slot is as wide as its square highlight (BAR_H less 2 px at each edge): no empty space inside the slots
-    let bw = (((w - 2 * margin + gap) / n.max(1)) - gap).clamp(sc(16), sc(BAR_H - 4));
+    // Windows 11: 44 px slots side by side, no gap (the highlight's own inset separates them); narrower when crowded
+    let gap = 0;
+    let bw = (((w - 2 * margin + gap) / n.max(1)) - gap).clamp(sc(16), sc(BTN_W));
     // centered on search + Start + pins only: opening an unpinned window adds a button on the right instead of shifting Start left
     let fixed = (PINS.with_borrow(|p| p.len()) as i32 + 2).min(n);
     // ...but never so far right that the windows' buttons run into the tray: then the whole row shifts left
@@ -2125,20 +2130,13 @@ unsafe fn draw_bar(dc: HDC, cr: RECT, quality: u32) {
     let hot = HOT.get();
     let active_bg = mix(pal().active, pal().accent, 0.12); // the focused app's button: a hint of the accent, not plain grey
 
-    // the search / Start / app buttons are squares nearly as tall as the bar (2 px from each edge, the slot as wide as
-    // the square): big icons, little empty space between them. A smaller square inside a wider slot only if the bar is
-    // too crowded for full-size slots.
-    let (atop, abot) = (sc(2), h - sc(2));
-    let square = |r: RECT| {
-        let s = (r.bottom - r.top).min(r.right - r.left);
-        let x = r.left + (r.right - r.left - s) / 2;
-        let y = r.top + (r.bottom - r.top - s) / 2;
-        RECT { left: x, top: y, right: x + s, bottom: y + s }
-    };
+    // search / Start / app buttons as on Windows 11: the slot is the full bar height, the highlight inset 2 px at the
+    // sides and 4 px at top and bottom (40x40 in a 44 px slot of a 48 px bar), corner radius 4
+    let hl = |r: RECT| RECT { left: r.left + sc(2), top: r.top + sc(4), right: r.right - sc(2), bottom: r.bottom - sc(4) };
 
     // search button (left of Start)
-    let sb = RECT { left: l.x0, top: atop, right: l.x0 + l.bw, bottom: abot };
-    glow(dc, SEARCH, hot == SEARCH, square(sb), pal().bg, pal().hover, sc(8));
+    let sb = RECT { left: l.x0, top: 0, right: l.x0 + l.bw, bottom: h };
+    glow(dc, SEARCH, hot == SEARCH, hl(sb), pal().bg, pal().hover, sc(8));
     SelectObject(dc, f_glyph);
     text(dc, "\u{E721}", sb, if hot == SEARCH { pal().text } else { mix(pal().dim, pal().text, 0.5) }, DT_CENTER);
 
@@ -2146,11 +2144,11 @@ unsafe fn draw_bar(dc: HDC, cr: RECT, quality: u32) {
     BTNS.with_borrow(|btns| {
         for (i, b) in btns.iter().enumerate() {
             let x = l.x0 + (i as i32 + 1) * (l.bw + l.gap);
-            let r = RECT { left: x, top: atop, right: x + l.bw, bottom: abot };
+            let r = RECT { left: x, top: 0, right: x + l.bw, bottom: h };
             let act = b.wins.contains(&fg);
             let (th, ta, tp) = (hv(i as i32, hot == i as i32), hv(2000 + i as i32, act), press_t(i as i32));
             if th > 0.01 || ta > 0.01 || tp > 0.0 {
-                fill(dc, square(r), mix(mix(mix(pal().bg, pal().hover, th), active_bg, ta), pal().accent, 0.5 * tp), sc(8));
+                fill(dc, hl(r), mix(mix(mix(pal().bg, pal().hover, th), active_bg, ta), pal().accent, 0.5 * tp), sc(8));
             }
             if i == 0 {
                 // Windows logo in four tiles, lit from the top left; grows a little on hover, squeezes on click
@@ -2168,16 +2166,15 @@ unsafe fn draw_bar(dc: HDC, cr: RECT, quality: u32) {
                 None => b.icon,
             };
             let key = b.pin.map(|p| -(p as isize) - 1).or_else(|| b.wins.first().map(|&w| w as isize)).unwrap_or(0);
-            // squeezes on click, grows in when new, lifts a pixel on hover
+            // squeezes on click, grows in when new; centred in the button like Windows 11 (no hover lift)
             let isz = (icon_px().min(l.bw - sc(6)) as f32 * (1.0 - 0.18 * tp) * (0.55 + 0.45 * appear(key))) as i32;
             if !ic.is_null() {
-                // centred in the square, one px up so the running-app pill under it has room
-                DrawIconEx(dc, x + (l.bw - isz) / 2, mid - isz / 2 - sc(1) - (sc(1) as f32 * th) as i32, ic, isz, isz, 0, null_mut(), DI_NORMAL);
+                DrawIconEx(dc, x + (l.bw - isz) / 2, h / 2 - isz / 2, ic, isz, isz, 0, null_mut(), DI_NORMAL);
             }
             if !b.wins.is_empty() {
                 let min = b.wins.iter().all(|&w| IsIconic(w) != 0);
-                let pw = sc(6) + (sc(12) as f32 * ta) as i32; // the running-app pill stretches when its window is active
-                let py = square(r).bottom - sc(4); // inside the square, under the icon
+                let pw = sc(6) + (sc(10) as f32 * ta) as i32; // the running-app line: 6 px, 16 px for the active window
+                let py = hl(r).bottom - sc(1) - sc(3); // 3 px tall, at the bottom of the highlight
                 let col = if act { pal().accent } else if min { mix(pal().dim, pal().bg, 0.45) } else { pal().dim };
                 fill(dc, RECT { left: x + (l.bw - pw) / 2, top: py, right: x + (l.bw + pw) / 2, bottom: py + sc(3) }, col, sc(3));
                 if b.wins.len() > 1 {
