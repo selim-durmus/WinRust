@@ -130,6 +130,7 @@ struct TIcon {
     uid: u32,
     guid: [u8; 16], // zero unless the app identifies the icon by GUID
     icon: HICON,    // our own copy
+    isz: i32,       // its width in px as the app made it (often the small-icon size of the app's DPI)
     cb: u32,        // uCallbackMessage
     ver: u32,       // NIM_SETVERSION value; >= 4 means the NOTIFYICON_VERSION_4 message format
     hidden: bool,
@@ -186,6 +187,7 @@ thread_local! {
     static SHOWN: RefCell<Option<Vec<String>>> = const { RefCell::new(None) }; // tray icons kept on the bar (by exe); None = none: every tray icon lives in the chevron flyout
     static TRAYFLY: Cell<HWND> = const { Cell::new(null_mut()) };
     static TF_ANIM: Cell<(u64, i32, i32)> = const { Cell::new((0, 0, 0)) }; // tray flyout: when it opened, its final x, y
+    static TF_MENU: Cell<(u64, u32, bool)> = const { Cell::new((0, 0, false)) }; // tray flyout right click: when, the icon owner's pid, its menu seen
     static FHOT: Cell<i32> = const { Cell::new(-1) };
     static HOT: Cell<i32> = const { Cell::new(NONE) };
     static ORDER: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) }; // unpinned windows in the order their buttons were added
@@ -274,7 +276,7 @@ unsafe fn tray_msg(d: &[u8]) {
                         if n == "explorer.exe" || n == "topbar.exe" || (n == "onedrive.exe" && hide_onedrive()) {
                             return; // the system's own icons are drawn by the bar itself
                         }
-                        t.push(TIcon { hwnd: h, uid, guid, icon: null_mut(), cb: 0, ver: 0, hidden: false, tip: String::new(), key: n.to_string() });
+                        t.push(TIcon { hwnd: h, uid, guid, icon: null_mut(), isz: 0, cb: 0, ver: 0, hidden: false, tip: String::new(), key: n.to_string() });
                         t.len() - 1
                     }
                 };
@@ -289,6 +291,7 @@ unsafe fn tray_msg(d: &[u8]) {
                             DestroyIcon(x.icon);
                         }
                         x.icon = ic;
+                        x.isz = icon_width(ic);
                     }
                 }
                 if flags & 4 != 0 {
@@ -318,6 +321,30 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         return r as LRESULT;
     }
     DefWindowProcW(hwnd, msg, wp, lp)
+}
+
+/// Width in px of the bitmap inside `ic` (0 if it cannot be read).
+unsafe fn icon_width(ic: HICON) -> i32 {
+    let mut ii: ICONINFO = zeroed();
+    if GetIconInfo(ic, &mut ii) == 0 {
+        return 0;
+    }
+    let mut bm: BITMAP = zeroed();
+    let src = if !ii.hbmColor.is_null() { ii.hbmColor } else { ii.hbmMask };
+    GetObjectW(src, size_of::<BITMAP>() as i32, &mut bm as *mut _ as *mut _);
+    for b in [ii.hbmColor, ii.hbmMask] {
+        if !b.is_null() {
+            DeleteObject(b);
+        }
+    }
+    // a mask-only (monochrome) icon stacks AND and XOR masks: the bitmap is twice as tall, not wider
+    bm.bmWidth
+}
+
+/// The size to draw a tray icon in the flyout: the app's own size when it is near the slot (sharp, no resampling),
+/// otherwise the slot. Stretching e.g. 24 px to 30 px with DrawIconEx doubles every fourth row and column: jagged.
+fn fly_icon_px(native: i32) -> i32 {
+    if (sc(16)..=sc(24)).contains(&native) { native } else if native > sc(24) { sc(20) } else { sc(16) }
 }
 
 /// Posts the same messages explorer would for a click on the icon; the app shows its own window or menu.
@@ -392,6 +419,8 @@ unsafe fn fly_toggle() {
     }
     let (_, fw, fh) = fly_size();
     FHOT.set(-1);
+    TF_MENU.set((0, 0, false));
+    KillTimer(w, 2);
     let scr = GetSystemMetrics(SM_CXSCREEN);
     let (bx, bw) = bar_x_w();
     let cx = bx + layout(bw).apps.0 + sc(12); // above the chevron
@@ -403,6 +432,23 @@ unsafe fn fly_toggle() {
     InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0); // the bar's chevron turns with it
     SetTimer(w, 1, 15, None);
     SetForegroundWindow(w); // so that WM_ACTIVATE tells us when the user clicks elsewhere
+}
+
+/// How long after a right click in the flyout its app's menu may take to show up (slow apps answer late).
+const TF_MENU_WAIT: u64 = 1500;
+
+/// An app's tray menu is on screen: a standard popup menu (class #32768), or a visible captionless popup of the
+/// icon's process in front (apps that draw their own menu).
+unsafe fn app_menu_up(pid: u32) -> bool {
+    let menu = FindWindowW(wide("#32768").as_ptr(), null());
+    if !menu.is_null() && IsWindowVisible(menu) != 0 {
+        return true;
+    }
+    let fg = GetForegroundWindow();
+    let mut fpid = 0u32;
+    GetWindowThreadProcessId(fg, &mut fpid);
+    let st = GetWindowLongW(fg, GWL_STYLE) as u32;
+    pid != 0 && fpid == pid && IsWindowVisible(fg) != 0 && st & WS_POPUP != 0 && st & WS_CAPTION != WS_CAPTION
 }
 
 /// How far the tray flyout still is from its place at opening progress `e` (0..1): it rises toward the bar's far side.
@@ -447,8 +493,7 @@ unsafe extern "system" fn fly_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             SetTextColor(dc, pal().dim);
             let mut tip = String::new();
             let over = over_idx();
-            let sz = sc(20);
-            let mut icons: Vec<(i32, i32, HICON, f32)> = Vec::new(); // icon's top left, icon, its opening progress
+            let mut icons: Vec<(i32, i32, i32, HICON, f32)> = Vec::new(); // icon's top left, size, icon, opening progress
             TAPPS.with_borrow(|t| {
                 for (n, ti) in over.iter().map(|&i| &t[i]).enumerate() {
                     let (x, y) = (sc(8) + (n % cols) as i32 * sc(FCELL), sc(8) + (n / cols) as i32 * sc(FCELL));
@@ -457,12 +502,13 @@ unsafe extern "system" fn fly_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                         tip = ti.tip.clone();
                     }
                     if !ti.icon.is_null() {
-                        icons.push((x + sc(19) - sz / 2, y + sc(18) - sz / 2, ti.icon, tf_progress(n as i32)));
+                        let sz = fly_icon_px(ti.isz);
+                        icons.push((x + sc(19) - sz / 2, y + sc(18) - sz / 2, sz, ti.icon, tf_progress(n as i32)));
                     }
                 }
             });
-            if icons.iter().all(|i| i.3 >= 1.0) {
-                for &(x, y, ic, _) in &icons {
+            if icons.iter().all(|i| i.4 >= 1.0) {
+                for &(x, y, sz, ic, _) in &icons {
                     DrawIconEx(dc, x, y, ic, sz, sz, 0, null_mut(), DI_NORMAL);
                 }
             } else {
@@ -472,10 +518,10 @@ unsafe extern "system" fn fly_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 let (idc, ibmp) = (CreateCompatibleDC(wdc), CreateCompatibleBitmap(wdc, r.right, r.bottom));
                 let oi = SelectObject(idc, ibmp);
                 BitBlt(idc, 0, 0, r.right, r.bottom, dc, 0, 0, SRCCOPY);
-                for &(x, y, ic, _) in &icons {
+                for &(x, y, sz, ic, _) in &icons {
                     DrawIconEx(idc, x, y, ic, sz, sz, 0, null_mut(), DI_NORMAL);
                 }
-                for &(x, y, _, p) in &icons {
+                for &(x, y, sz, _, p) in &icons {
                     if p >= 1.0 {
                         BitBlt(dc, x, y, sz, sz, idc, x, y, SRCCOPY);
                     } else if p > 0.0 {
@@ -489,7 +535,7 @@ unsafe extern "system" fn fly_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 DeleteDC(idc);
             }
             if tip.is_empty() {
-                tip = if over.is_empty() { "No more icons".into() } else { "Middle click: move to the bar".into() };
+                tip = if over.is_empty() { "No more icons".into() } else { String::new() }; // the hovered icon's name shows here
             }
             let mut tr = RECT { left: sc(10), top: r.bottom - sc(26), right: r.right - sc(10), bottom: r.bottom - sc(4) };
             DrawTextW(dc, wide(&tip).as_ptr(), -1, &mut tr, DT_LEFT | DT_NOPREFIX | DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
@@ -523,6 +569,13 @@ unsafe extern "system" fn fly_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 if msg == WM_MBUTTONDOWN {
                     toggle_shown(&key);
                     InvalidateRect(hwnd, null(), 0);
+                } else if msg == WM_RBUTTONDOWN {
+                    // the flyout stays behind the app's menu (as in Windows 11) and closes once the menu is gone
+                    let mut pid = 0u32;
+                    GetWindowThreadProcessId(t.0, &mut pid);
+                    TF_MENU.set((now_ms(), pid, false));
+                    SetTimer(hwnd, 2, 100, None);
+                    tray_click(t, false);
                 } else {
                     ShowWindow(hwnd, SW_HIDE);
                     InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0); // the bar's chevron turns with it
@@ -532,8 +585,26 @@ unsafe extern "system" fn fly_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             0
         }
         WM_ACTIVATE if wp & 0xffff == 0 => {
-            ShowWindow(hwnd, SW_HIDE);
-            InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0); // the bar's chevron turns with it
+            // right after a right click the app takes the foreground for its menu: timer 2 decides when to close
+            if now_ms().saturating_sub(TF_MENU.get().0) > TF_MENU_WAIT {
+                ShowWindow(hwnd, SW_HIDE);
+                InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0); // the bar's chevron turns with it
+            }
+            0
+        }
+        WM_TIMER if wp == 2 => {
+            let (at, pid, seen) = TF_MENU.get();
+            if app_menu_up(pid) {
+                TF_MENU.set((at, pid, true));
+            } else if seen || now_ms().saturating_sub(at) > TF_MENU_WAIT {
+                // the menu closed (an item picked, Esc, a click elsewhere) or never came: close unless the user is back on us
+                KillTimer(hwnd, 2);
+                TF_MENU.set((0, 0, false));
+                if GetForegroundWindow() != hwnd {
+                    ShowWindow(hwnd, SW_HIDE);
+                    InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0);
+                }
+            }
             0
         }
         WM_TIMER => {
