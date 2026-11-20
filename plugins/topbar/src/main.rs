@@ -98,8 +98,11 @@ const WIFI_I: i32 = -7;
 const VOL_I: i32 = -8;
 const BAT_I: i32 = -9;
 const TAPP: i32 = -1000;
-const GEAR: i32 = -12; // the gear at the left end: the Style menu
-const GEAR_X: (i32, i32) = (6, 36); // its left edge and width, before scaling (sc() is applied where used)
+const GEAR: i32 = -12; // the gear at the left end of the right-hand group: the Style menu
+// widths of the right-hand group's blocks, before scaling (sc() is applied where used)
+const GEAR_W: i32 = 32;
+const SYS_CELL: i32 = 34; // one icon in the wifi / volume pill
+const BAT_W: i32 = 72; // the battery's icon and percentage in that pill (only with a battery)
 const SYS_GRP: i32 = -11; // hover key of the one pill around wifi + volume + battery (they open the same panel)
 const WIN_START: u32 = WM_APP + 10; // posted by the keyboard hook: Win key pressed alone
 const ALT_TAB: u32 = WM_APP + 11; // posted by the keyboard hook: Alt+Tab (wp 1 = Shift held: backwards)
@@ -199,6 +202,7 @@ thread_local! {
     static SCALE: Cell<f32> = const { Cell::new(1.0) };
     static OLD_STATE: Cell<usize> = const { Cell::new(ABS_ALWAYSONTOP as usize) };
     static BAT: Cell<(i32, bool)> = const { Cell::new((-1, false)) }; // (percent or -1 = no battery, on AC)
+    static CLOCK_W: Cell<i32> = const { Cell::new(0) }; // the clock block's width as last measured from its text; 0 = not yet
     static VOL: Cell<(i32, bool)> = const { Cell::new((-1, false)) }; // (percent or -1 = unknown, muted)
     static WIFI: Cell<i32> = const { Cell::new(-1) }; // signal quality 0..100, -1 = not on wifi
     static INET: Cell<bool> = const { Cell::new(true) }; // Windows sees a way to the internet (any adapter)
@@ -1397,45 +1401,61 @@ struct Layout {
     x0: i32, // first slot: the search button; Start and the rest follow
     bw: i32,
     gap: i32,
+    gear: (i32, i32),
     apps: (i32, i32),
     sys: (i32, i32),
     clock: (i32, i32),
 }
 
+/// The right-hand group, right to left with the same gap between blocks: clock (as wide as its text), the wifi /
+/// volume (/ battery) pill, the tray (chevron + icons), the gear. No language button: Win+Space switches the layout.
 fn layout(w: i32) -> Layout {
     let gap = sc(4);
-    let clock = (w - sc(96), w - sc(6));
-    // the wifi/volume pill (no language button: Win+Space switches the layout): its icons end at 62, then the same
-    // 8 px as on its left; a battery adds its icon and percentage. Without one (a desktop) the pill ends right after the
-    // volume icon instead of leaving its slot empty.
-    let sys = (clock.0 - sc(4) - sc(if BAT.get().0 >= 0 { 172 } else { 70 }), clock.0 - sc(4));
-    let apps = (sys.0 - sc(24) * tray_count() as i32, sys.0);
-    let margin = (w - apps.0) + sc(8); // keep the button group centered and clear of both sides
+    let cw = match CLOCK_W.get() {
+        0 => sc(90),
+        v => v,
+    };
+    let clock = (w - sc(6) - cw, w - sc(6));
+    // without a battery (a desktop) the pill ends right after the volume icon instead of leaving its slot empty
+    let pill = sc(2 * SYS_CELL) + if BAT.get().0 >= 0 { sc(BAT_W) } else { 0 };
+    let sys = (clock.0 - gap - pill, clock.0 - gap);
+    let apps = (sys.0 - gap - sc(24) * tray_count() as i32, sys.0 - gap);
+    let gear = (apps.0 - gap - sc(GEAR_W), apps.0 - gap);
+    let margin = (w - gear.0) + sc(8); // keep the button group centered and clear of both sides
     let n = BTNS.with_borrow(|b| b.len()) as i32 + 1; // + the search slot
     let bw = (((w - 2 * margin + gap) / n.max(1)) - gap).clamp(sc(16), sc(44));
     // centered on search + Start + pins only: opening an unpinned window adds a button on the right instead of shifting Start left
     let fixed = (PINS.with_borrow(|p| p.len()) as i32 + 2).min(n);
     // ...but never so far right that the windows' buttons run into the tray: then the whole row shifts left
     let right_limit = w - margin - (n * (bw + gap) - gap);
-    Layout { x0: ((w - (fixed * (bw + gap) - gap)) / 2).min(right_limit).max(sc(GEAR_X.0 + GEAR_X.1 + 6)), bw, gap, apps, sys, clock } // clear of the gear
+    Layout { x0: ((w - (fixed * (bw + gap) - gap)) / 2).min(right_limit).max(sc(6)), bw, gap, gear, apps, sys, clock }
 }
 
 unsafe fn hit(hwnd: HWND, x: i32) -> i32 {
     let mut r: RECT = zeroed();
     GetClientRect(hwnd, &mut r);
     let l = layout(r.right);
-    if x < sc(GEAR_X.0 + GEAR_X.1) {
-        return GEAR;
-    }
     if x >= l.clock.0 {
         return CLOCK;
     }
+    if x >= l.sys.1 {
+        return NONE; // the gaps between the blocks
+    }
     if x >= l.sys.0 {
         let d = x - l.sys.0;
-        return if d < sc(30) { WIFI_I } else if d < sc(62) { VOL_I } else { BAT_I };
+        return if d < sc(SYS_CELL) { WIFI_I } else if d < sc(2 * SYS_CELL) { VOL_I } else { BAT_I };
+    }
+    if x >= l.apps.1 {
+        return NONE;
     }
     if x >= l.apps.0 {
         return TAPP + (x - l.apps.0) / sc(24);
+    }
+    if x >= l.gear.1 {
+        return NONE;
+    }
+    if x >= l.gear.0 {
+        return GEAR;
     }
     let n = BTNS.with_borrow(|b| b.len()) as i32 + 1;
     let (d, i) = (x - l.x0, (x - l.x0) / (l.bw + l.gap));
@@ -2078,6 +2098,22 @@ unsafe fn draw_bar(dc: HDC, cr: RECT, quality: u32) {
     let (f_txt, f_small, f_glyph, f_bold) = (font(&face, 13, 400), font(&face, 12, 400), font(&gface, 16, 400), font(&face, 13, 600));
     let of = SelectObject(dc, f_txt);
 
+    // the clock block is as wide as its text plus the same padding as the other blocks. Measured with every digit as 0
+    // (and a two-digit hour) so the group does not shift when the time ticks from 9:59 to 10:00.
+    let (tm, dt) = clock_texts();
+    let zeros = |s: &str| s.chars().map(|c| if c.is_ascii_digit() { '0' } else { c }).collect::<String>();
+    let tw = |f: HFONT, s: &str| {
+        SelectObject(dc, f);
+        let w = wide(s);
+        let mut sz: SIZE = zeroed();
+        GetTextExtentPoint32W(dc, w.as_ptr(), w.len() as i32 - 1, &mut sz);
+        sz.cx
+    };
+    let tz = zeros(&tm);
+    let tz = if tz.find(':') == Some(1) { format!("0{tz}") } else { tz };
+    CLOCK_W.set(tw(f_bold, &tz).max(tw(f_small, &zeros(&dt))) + sc(16));
+    SelectObject(dc, f_txt);
+
     let l = layout(cr.right);
     let fg = GetForegroundWindow();
     let (top, bot) = (sc(4), h - sc(4));
@@ -2087,7 +2123,7 @@ unsafe fn draw_bar(dc: HDC, cr: RECT, quality: u32) {
     let active_bg = mix(pal().active, pal().accent, 0.12); // the focused app's button: a hint of the accent, not plain grey
 
     // the gear at the left end: the Style menu
-    let gr = RECT { left: sc(GEAR_X.0), top, right: sc(GEAR_X.0 + GEAR_X.1), bottom: bot };
+    let gr = RECT { left: l.gear.0, top, right: l.gear.1, bottom: bot };
     glow(dc, GEAR, hot == GEAR, gr, pal().bg, pal().hover, sc(8));
     SelectObject(dc, f_glyph);
     text(dc, "\u{E713}", gr, if hot == GEAR { pal().text } else { mix(pal().dim, pal().text, 0.5) }, DT_CENTER);
@@ -2145,7 +2181,7 @@ unsafe fn draw_bar(dc: HDC, cr: RECT, quality: u32) {
 
     // a hairline between the app buttons and the tray side (not on the clear bar: nothing to divide, it would float alone)
     if i18n::style::bar_opacity() > 0 {
-        fill(dc, RECT { left: l.apps.0 - sc(5), top: mid - sc(9), right: l.apps.0 - sc(5) + 1, bottom: mid + sc(9) }, pal().line, 0);
+        fill(dc, RECT { left: l.gear.0 - sc(5), top: mid - sc(9), right: l.gear.0 - sc(5) + 1, bottom: mid + sc(9) }, pal().line, 0);
     }
 
     // tray apps
@@ -2175,14 +2211,14 @@ unsafe fn draw_bar(dc: HDC, cr: RECT, quality: u32) {
     if tg > 0.01 || pg > 0.0 {
         fill(dc, grp, mix(mix(pal().bg, pal().hover, tg), pal().accent, 0.5 * pg), sc(8));
     }
-    let mut x = tb.left + sc(8);
-    net_icon(dc, x + sc(9), mid, sc(17), f_glyph);
-    x += sc(32);
+    // each icon centred in its own cell: equal space around both, and the pill's edges as far from them as they are apart
+    let c = sc(SYS_CELL);
+    net_icon(dc, tb.left + c / 2, mid, sc(17), f_glyph);
     SelectObject(dc, f_glyph);
     let (vol, muted) = VOL.get();
     let vg = if muted || vol == 0 { "\u{E74F}" } else if vol < 34 { "\u{E993}" } else if vol < 67 { "\u{E994}" } else { "\u{E995}" };
-    text(dc, vg, cell(x, sc(22)), if muted { BAD } else { pal().text }, DT_CENTER);
-    x += sc(32);
+    text(dc, vg, cell(tb.left + c, c), if muted { BAD } else { pal().text }, DT_CENTER);
+    let x = tb.left + 2 * c + sc(6);
     let (pct, ac) = BAT.get();
     if pct >= 0 {
         let col = if ac { GOOD } else if pct <= 15 { BAD } else { pal().text };
@@ -2199,7 +2235,6 @@ unsafe fn draw_bar(dc: HDC, cr: RECT, quality: u32) {
     // time (semibold) over the date (dimmed)
     let cb = cell(l.clock.0, l.clock.1 - l.clock.0);
     glow(dc, CLOCK, hot == CLOCK || fly::is_open(fly::Kind::Cal), cb, pal().bg, pal().hover, sc(8));
-    let (tm, dt) = clock_texts();
     SelectObject(dc, f_bold);
     text(dc, &tm, RECT { left: cb.left, top: cb.top, right: cb.right, bottom: mid + sc(1) }, pal().text, DT_CENTER);
     SelectObject(dc, f_small);
@@ -2628,13 +2663,13 @@ unsafe fn min_rect(info: *mut ShellHookInfo, bar: HWND) {
 /// Screen x of the middle of a bar element, for its tooltip and menus.
 unsafe fn tip_cx(l: &Layout, h: i32) -> i32 {
     bar_x_w().0 + match h {
-        GEAR => sc(GEAR_X.0 + GEAR_X.1 / 2),
+        GEAR => (l.gear.0 + l.gear.1) / 2,
         SEARCH => l.x0 + l.bw / 2,
         CLOCK => (l.clock.0 + l.clock.1) / 2,
         LANG => l.sys.0 + sc(21),
-        WIFI_I => l.sys.0 + sc(14),
-        VOL_I => l.sys.0 + sc(46),
-        BAT_I => l.sys.0 + sc(86),
+        WIFI_I => l.sys.0 + sc(SYS_CELL) / 2,
+        VOL_I => l.sys.0 + sc(SYS_CELL) * 3 / 2,
+        BAT_I => l.sys.0 + sc(2 * SYS_CELL + BAT_W / 2),
         t if (TAPP..TAPP + 100).contains(&t) => l.apps.0 + (t - TAPP) * sc(24) + sc(12),
         i => l.x0 + (i + 1) * (l.bw + l.gap) + l.bw / 2,
     }
