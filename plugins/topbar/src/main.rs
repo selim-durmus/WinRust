@@ -2297,15 +2297,20 @@ unsafe fn open(path: &[u16]) {
     let aumid = p.get(..17).filter(|h| h.eq_ignore_ascii_case(r"shell:AppsFolder\")).and(p.get(17..)).filter(|a| a.contains('!'));
     if let Some(aumid) = aumid.filter(|_| !EXPLORER_UP.load(Relaxed)) {
         let (aumid, p) = (aumid.to_string(), p.clone());
-        thread::spawn(move || unsafe {
+        let t = thread::spawn(move || unsafe {
             if !activate_app(&aumid) {
                 open_via_explorer(&p);
             }
         });
+        if OPEN_WAIT.load(Relaxed) {
+            let _ = t.join(); // `topbar --open`: the process must not end before the launch did
+        }
         return;
     }
     open_via_explorer(&p);
 }
+
+static OPEN_WAIT: AtomicBool = AtomicBool::new(false);
 
 /// Always through explorer.exe: it starts the target with the desktop user's normal token. ShellExecuteW from here would
 /// inherit this bar's admin rights, and an elevated app cannot receive files dragged in from normal windows (UIPI), and
@@ -2894,6 +2899,14 @@ fn main() {
                 set_work_area(RECT { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) }); // a killed bar's reserved strip
             }
             announce(); // a killed bar took its tray icons with it; apps re-register with explorer
+            return;
+        }
+        // `topbar --open <target>`: runs the bar's own launch code once and exits, to test how the (elevated) bar starts
+        // things, e.g. `topbar --open "shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"` from an admin shell
+        if let Some(t) = std::env::args().skip_while(|a| a != "--open").nth(1) {
+            EXPLORER_UP.store(!FindWindowW(wide("Shell_TrayWnd").as_ptr(), null()).is_null(), Relaxed);
+            OPEN_WAIT.store(true, Relaxed);
+            open(&wide(&t));
             return;
         }
         if std::env::args().any(|a| a == "--shot") {
