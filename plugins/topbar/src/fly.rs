@@ -877,13 +877,21 @@ unsafe fn anim_step(hw: HWND) {
 
 pub fn toggle(k: Kind) {
     if FLY.get() == Some(k) {
-        return close();
+        close();
+        // closed by this very toggle (the Win key, its button): the next press may reopen it at once. The guard below is
+        // only for a close caused by losing focus to the click that is now toggling it.
+        LAST.set((None, 0));
+        return;
     }
     let (was, at) = LAST.get();
     if was == Some(k) && unsafe { now_ms() }.saturating_sub(at) < 400 {
         return; // it closed an instant ago (focus moved to the key / click that is toggling it): this press means "close", not "reopen"
     }
     close();
+    // the same panel reopening while its last copy still fades out: drop that copy instead of showing two
+    if GHOST.get().0 != null_mut() && (was == Some(k) || was.is_none()) {
+        unsafe { kill_ghost() };
+    }
     unsafe {
         HV.with_borrow_mut(|m| m.retain(|k, _| *k < 1_000_000)); // flyout keys are >= 1_000_000: no stale glow from the last panel
         CTX.set(None);
