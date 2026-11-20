@@ -2290,9 +2290,12 @@ unsafe fn open(path: &[u16]) {
         return winrust_common::settings::open(&p); // needs Explorer as shell: it is started for the time Settings is open
     }
     // A Store (MSIX) app from the Apps folder: "explorer.exe shell:AppsFolder\<AUMID>" fails with "Class not registered"
-    // when explorer is not the running shell (rs-shell). The activation service starts it directly, with the user's own
-    // token whatever ours is, and needs no explorer. On its own thread: it waits until the app has started.
-    if let Some(aumid) = p.get(..17).filter(|h| h.eq_ignore_ascii_case(r"shell:AppsFolder\")).and(p.get(17..)).filter(|a| a.contains('!')) {
+    // when explorer is not the running shell (rs-shell). Then the activation service starts it directly and needs no
+    // explorer (packaged desktop apps like 1Password run fine). Only then: activated from this elevated bar, a UWP app
+    // (Calculator) hangs on its splash screen, so with explorer as the shell it goes the usual way below.
+    // On its own thread: activation waits until the app has started.
+    let aumid = p.get(..17).filter(|h| h.eq_ignore_ascii_case(r"shell:AppsFolder\")).and(p.get(17..)).filter(|a| a.contains('!'));
+    if let Some(aumid) = aumid.filter(|_| !EXPLORER_UP.load(Relaxed)) {
         let (aumid, p) = (aumid.to_string(), p.clone());
         thread::spawn(move || unsafe {
             if !activate_app(&aumid) {
