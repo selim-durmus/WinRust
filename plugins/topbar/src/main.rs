@@ -1405,7 +1405,9 @@ struct Layout {
 fn layout(w: i32) -> Layout {
     let gap = sc(4);
     let clock = (w - sc(96), w - sc(6));
-    let sys = (clock.0 - sc(4) - sc(150 + if BAT.get().0 >= 0 { 66 } else { 0 }), clock.0 - sc(4));
+    // language (42) + the wifi/volume pill: its icons end at 106, then the same 8 px as on its left; a battery adds
+    // its icon and percentage. Without one (a desktop) the pill ends right after the volume icon instead of leaving its slot empty.
+    let sys = (clock.0 - sc(4) - sc(if BAT.get().0 >= 0 { 216 } else { 114 }), clock.0 - sc(4));
     let apps = (sys.0 - sc(24) * tray_count() as i32, sys.0);
     let margin = (w - apps.0) + sc(8); // keep the button group centered and clear of both sides
     let n = BTNS.with_borrow(|b| b.len()) as i32 + 1; // + the search slot
