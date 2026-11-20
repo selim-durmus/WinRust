@@ -121,7 +121,10 @@ pub(crate) fn rx_uninstall() -> Result<(), String> {
     for n in ["rs-shell.exe", "rust-explorer.exe"] {
         let _ = run("taskkill", &["/f", "/im", n]);
     }
-    let _ = run("powershell", &["-NoProfile", "-Command", r#"if (-not (Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Where-Object { $_.CommandLine -match '(?i)explorer\.exe"?(\s+/NoUACCheck)?\s*$' })) { runas /trustlevel:0x20000 C:\Windows\explorer.exe }"#]);
+    // the shell back with the user's normal token: this uninstaller is elevated, and runas /trustlevel from here gave
+    // Explorer an elevated-type token, under which Store apps (Calculator) open suspended and hidden (winrust_common::shell)
+    let ps = format!(r#"if (-not (Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Where-Object {{ $_.CommandLine -match '(?i)explorer\.exe"?(\s+/NoUACCheck)?\s*$' }})) {{ {} }}"#, i18n::shell::START_EXPLORER_PS);
+    let _ = run("powershell", &["-NoProfile", "-Command", &ps]);
     let _ = fs::remove_file(rx_lnk());
     let _ = fs::remove_file(start_lnk("Rust Explorer"));
     let _ = fs::remove_dir_all(rx_dir());

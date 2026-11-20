@@ -229,10 +229,11 @@ fn may_end_explorer(markers: bool, since_start: Duration) -> bool {
     markers || since_start >= AUTOSTART_GRACE
 }
 
-/// Gives the user Explorer back (with a normal, not elevated, token: the shell must never run elevated).
+/// Gives the user Explorer back (with a normal, not elevated, token: the shell must never run elevated; see
+/// winrust_common::shell for why not runas /trustlevel).
 fn start_shell_explorer() {
-    let r = quiet("runas").args(["/trustlevel:0x20000", r"C:\Windows\explorer.exe"]).creation_flags(NO_WINDOW).spawn();
-    log(&format!("explorer shell started -> {:?}", r.map(|_| ())));
+    let r = winrust_common::shell::start_explorer(false);
+    log(&format!("explorer shell started -> {r:?}"));
 }
 
 fn overlay() {
