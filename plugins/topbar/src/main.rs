@@ -2288,13 +2288,43 @@ unsafe fn open(path: &[u16]) {
     if p.to_lowercase().starts_with("ms-settings:") {
         return winrust_common::settings::open(&p); // needs Explorer as shell: it is started for the time Settings is open
     }
-    // Always through explorer.exe: it starts the target with the desktop user's normal token. ShellExecuteW from here would
-    // inherit this bar's admin rights, and an elevated app cannot receive files dragged in from normal windows (UIPI), and
-    // PrtSc / Win+Shift+S (ms-screenclip:) do not work when started elevated. With an argument and no explorer shell
-    // running, explorer.exe hands the target to its COM host and does not become a shell or raise a taskbar.
-    if Command::new("explorer.exe").arg(&p).spawn().is_err() {
-        ShellExecuteW(null_mut(), wide("open").as_ptr(), wide(&p).as_ptr(), null(), null(), SW_SHOWNORMAL);
+    // A Store (MSIX) app from the Apps folder: "explorer.exe shell:AppsFolder\<AUMID>" fails with "Class not registered"
+    // when explorer is not the running shell (rs-shell). The activation service starts it directly, with the user's own
+    // token whatever ours is, and needs no explorer. On its own thread: it waits until the app has started.
+    if let Some(aumid) = p.get(..17).filter(|h| h.eq_ignore_ascii_case(r"shell:AppsFolder\")).and(p.get(17..)).filter(|a| a.contains('!')) {
+        let (aumid, p) = (aumid.to_string(), p.clone());
+        thread::spawn(move || unsafe {
+            if !activate_app(&aumid) {
+                open_via_explorer(&p);
+            }
+        });
+        return;
     }
+    open_via_explorer(&p);
+}
+
+/// Always through explorer.exe: it starts the target with the desktop user's normal token. ShellExecuteW from here would
+/// inherit this bar's admin rights, and an elevated app cannot receive files dragged in from normal windows (UIPI), and
+/// PrtSc / Win+Shift+S (ms-screenclip:) do not work when started elevated. With an argument and no explorer shell
+/// running, explorer.exe hands the target to its COM host and does not become a shell or raise a taskbar.
+unsafe fn open_via_explorer(p: &str) {
+    if Command::new("explorer.exe").arg(p).spawn().is_err() {
+        ShellExecuteW(null_mut(), wide("open").as_ptr(), wide(p).as_ptr(), null(), null(), SW_SHOWNORMAL);
+    }
+}
+
+/// Starts a packaged app by its AppUserModelID ("Agilebits.1Password_amwd9z03whsfe!Agilebits.OnePassword") through the
+/// activation service. false = it could not (then the caller tries explorer). Classic UWP apps (Calculator...) still need
+/// explorer's shell host and fail here without it; packaged desktop apps (1Password, Claude...) start fine.
+unsafe fn activate_app(aumid: &str) -> bool {
+    use windows::Win32::{
+        System::Com::CLSCTX_LOCAL_SERVER,
+        UI::Shell::{AO_NONE, ApplicationActivationManager, IApplicationActivationManager},
+    };
+    let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    let Ok(m) = CoCreateInstance::<_, IApplicationActivationManager>(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER) else { return false };
+    let id = wide(aumid);
+    m.ActivateApplication(PCWSTR(id.as_ptr()), PCWSTR::null(), AO_NONE).is_ok()
 }
 
 /// Starts the disk cleaner (rs-du, installed next to the task manager) elevated: it reads the raw volume.
