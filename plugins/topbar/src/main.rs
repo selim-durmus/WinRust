@@ -98,9 +98,7 @@ const WIFI_I: i32 = -7;
 const VOL_I: i32 = -8;
 const BAT_I: i32 = -9;
 const TAPP: i32 = -1000;
-const GEAR: i32 = -12; // the gear at the left end of the right-hand group: the Style menu
 // widths of the right-hand group's blocks, before scaling (sc() is applied where used)
-const GEAR_W: i32 = 32;
 const SYS_CELL: i32 = 34; // one icon in the wifi / volume pill
 const BAT_W: i32 = 72; // the battery's icon and percentage in that pill (only with a battery)
 const SYS_GRP: i32 = -11; // hover key of the one pill around wifi + volume + battery (they open the same panel)
@@ -114,6 +112,8 @@ static WIN_ALONE: AtomicBool = AtomicBool::new(false);
 static BAR: AtomicIsize = AtomicIsize::new(0); // the bar window, for the hook thread
 const VOLKEY: u32 = WM_APP + 14; // posted by the keyboard hook: a volume key (wp 0 up, 1 down, 2 mute)
 const SNIP: u32 = WM_APP + 13; // posted by the keyboard hook: PrtSc / Win+Shift+S with no explorer to handle them
+const NEXT_LANG: u32 = WM_APP + 15; // posted by the keyboard hook: Win+Space with no explorer to handle it
+const STYLE_MENU: u32 = WM_APP + 16; // posted by the empty-spot menu's "Bar style…" (wp: x to open the Style menu at)
 static EXPLORER_UP: AtomicBool = AtomicBool::new(true); // explorer's taskbar exists (it handles PrtSc itself then); refreshed by the bar
 
 struct Pin {
@@ -662,7 +662,6 @@ unsafe fn tip_text(h: i32) -> String {
         SEARCH => "Search".into(),
         0 => "Start".into(),
         TAPP => "Hidden icons".into(),
-        GEAR => t!("Стиль", "Style").into(),
         CLOCK => {
             let mut t: SYSTEMTIME = zeroed();
             GetLocalTime(&mut t);
@@ -1401,14 +1400,14 @@ struct Layout {
     x0: i32, // first slot: the search button; Start and the rest follow
     bw: i32,
     gap: i32,
-    gear: (i32, i32),
     apps: (i32, i32),
     sys: (i32, i32),
     clock: (i32, i32),
 }
 
 /// The right-hand group, right to left with the same gap between blocks: clock (as wide as its text), the wifi /
-/// volume (/ battery) pill, the tray (chevron + icons), the gear. No language button: Win+Space switches the layout.
+/// volume (/ battery) pill, the tray (chevron + icons). No language button (Win+Space switches the layout) and no gear
+/// (the Style menu is "Bar style…" in the empty-spot right-click menu).
 fn layout(w: i32) -> Layout {
     let gap = sc(4);
     let cw = match CLOCK_W.get() {
@@ -1420,15 +1419,14 @@ fn layout(w: i32) -> Layout {
     let pill = sc(2 * SYS_CELL) + if BAT.get().0 >= 0 { sc(BAT_W) } else { 0 };
     let sys = (clock.0 - gap - pill, clock.0 - gap);
     let apps = (sys.0 - gap - sc(24) * tray_count() as i32, sys.0 - gap);
-    let gear = (apps.0 - gap - sc(GEAR_W), apps.0 - gap);
-    let margin = (w - gear.0) + sc(8); // keep the button group centered and clear of both sides
+    let margin = (w - apps.0) + sc(8); // keep the button group centered and clear of both sides
     let n = BTNS.with_borrow(|b| b.len()) as i32 + 1; // + the search slot
     let bw = (((w - 2 * margin + gap) / n.max(1)) - gap).clamp(sc(16), sc(44));
     // centered on search + Start + pins only: opening an unpinned window adds a button on the right instead of shifting Start left
     let fixed = (PINS.with_borrow(|p| p.len()) as i32 + 2).min(n);
     // ...but never so far right that the windows' buttons run into the tray: then the whole row shifts left
     let right_limit = w - margin - (n * (bw + gap) - gap);
-    Layout { x0: ((w - (fixed * (bw + gap) - gap)) / 2).min(right_limit).max(sc(6)), bw, gap, gear, apps, sys, clock }
+    Layout { x0: ((w - (fixed * (bw + gap) - gap)) / 2).min(right_limit).max(sc(6)), bw, gap, apps, sys, clock }
 }
 
 unsafe fn hit(hwnd: HWND, x: i32) -> i32 {
@@ -1450,12 +1448,6 @@ unsafe fn hit(hwnd: HWND, x: i32) -> i32 {
     }
     if x >= l.apps.0 {
         return TAPP + (x - l.apps.0) / sc(24);
-    }
-    if x >= l.gear.1 {
-        return NONE;
-    }
-    if x >= l.gear.0 {
-        return GEAR;
     }
     let n = BTNS.with_borrow(|b| b.len()) as i32 + 1;
     let (d, i) = (x - l.x0, (x - l.x0) / (l.bw + l.gap));
@@ -1692,6 +1684,16 @@ unsafe extern "system" fn kb_hook(n: i32, w: WPARAM, l: LPARAM) -> LRESULT {
             let held = |vk: u16| GetAsyncKeyState(vk as i32) < 0;
             let snip_key = !EXPLORER_UP.load(Relaxed) && k.vkCode == VK_SNAPSHOT as u32;
             let win_shift_s = k.vkCode == b'S' as u32 && down0 && (held(VK_LWIN) || held(VK_RWIN)) && held(VK_SHIFT);
+            // Win+Space switches the input language in explorer's switcher; without explorer nobody does: the bar does
+            if !EXPLORER_UP.load(Relaxed) && k.vkCode == VK_SPACE as u32 && (held(VK_LWIN) || held(VK_RWIN)) {
+                if down0 {
+                    WIN_ALONE.store(false, Relaxed);
+                    keybd_event(0xE8, 0, 0, 0); // a key between Win down and up: no Start on the release
+                    keybd_event(0xE8, 0, KEYEVENTF_KEYUP, 0);
+                    PostMessageW(BAR.load(Relaxed) as HWND, NEXT_LANG, 0, 0);
+                }
+                return 1;
+            }
             if snip_key || win_shift_s {
                 if down0 {
                     WIN_ALONE.store(false, Relaxed);
@@ -2122,15 +2124,17 @@ unsafe fn draw_bar(dc: HDC, cr: RECT, quality: u32) {
     let hot = HOT.get();
     let active_bg = mix(pal().active, pal().accent, 0.12); // the focused app's button: a hint of the accent, not plain grey
 
-    // the gear at the left end: the Style menu
-    let gr = RECT { left: l.gear.0, top, right: l.gear.1, bottom: bot };
-    glow(dc, GEAR, hot == GEAR, gr, pal().bg, pal().hover, sc(8));
-    SelectObject(dc, f_glyph);
-    text(dc, "\u{E713}", gr, if hot == GEAR { pal().text } else { mix(pal().dim, pal().text, 0.5) }, DT_CENTER);
+    // a button's highlight: a square as tall as the row, centred in its slot (the slot is wider: a full-slot
+    // highlight was a wide box with the icon sitting high in it)
+    let square = |r: RECT| {
+        let s = (r.bottom - r.top).min(r.right - r.left);
+        let x = r.left + (r.right - r.left - s) / 2;
+        RECT { left: x, top: r.top, right: x + s, bottom: r.bottom }
+    };
 
     // search button (left of Start)
     let sb = RECT { left: l.x0, top, right: l.x0 + l.bw, bottom: bot };
-    glow(dc, SEARCH, hot == SEARCH, sb, pal().bg, pal().hover, sc(8));
+    glow(dc, SEARCH, hot == SEARCH, square(sb), pal().bg, pal().hover, sc(8));
     SelectObject(dc, f_glyph);
     text(dc, "\u{E721}", sb, if hot == SEARCH { pal().text } else { mix(pal().dim, pal().text, 0.5) }, DT_CENTER);
 
@@ -2142,7 +2146,7 @@ unsafe fn draw_bar(dc: HDC, cr: RECT, quality: u32) {
             let act = b.wins.contains(&fg);
             let (th, ta, tp) = (hv(i as i32, hot == i as i32), hv(2000 + i as i32, act), press_t(i as i32));
             if th > 0.01 || ta > 0.01 || tp > 0.0 {
-                fill(dc, r, mix(mix(mix(pal().bg, pal().hover, th), active_bg, ta), pal().accent, 0.5 * tp), sc(8));
+                fill(dc, square(r), mix(mix(mix(pal().bg, pal().hover, th), active_bg, ta), pal().accent, 0.5 * tp), sc(8));
             }
             if i == 0 {
                 // Windows logo in four tiles, lit from the top left; grows a little on hover, squeezes on click
@@ -2163,7 +2167,8 @@ unsafe fn draw_bar(dc: HDC, cr: RECT, quality: u32) {
             // squeezes on click, grows in when new, lifts a pixel on hover
             let isz = (icon_px().min(l.bw - sc(6)) as f32 * (1.0 - 0.18 * tp) * (0.55 + 0.45 * appear(key))) as i32;
             if !ic.is_null() {
-                DrawIconEx(dc, x + (l.bw - isz) / 2, mid - isz / 2 - sc(2) - (sc(1) as f32 * th) as i32, ic, isz, isz, 0, null_mut(), DI_NORMAL);
+                // centred in the square, one px up so the running-app pill under it has room
+                DrawIconEx(dc, x + (l.bw - isz) / 2, mid - isz / 2 - sc(1) - (sc(1) as f32 * th) as i32, ic, isz, isz, 0, null_mut(), DI_NORMAL);
             }
             if !b.wins.is_empty() {
                 let min = b.wins.iter().all(|&w| IsIconic(w) != 0);
@@ -2181,7 +2186,7 @@ unsafe fn draw_bar(dc: HDC, cr: RECT, quality: u32) {
 
     // a hairline between the app buttons and the tray side (not on the clear bar: nothing to divide, it would float alone)
     if i18n::style::bar_opacity() > 0 {
-        fill(dc, RECT { left: l.gear.0 - sc(5), top: mid - sc(9), right: l.gear.0 - sc(5) + 1, bottom: mid + sc(9) }, pal().line, 0);
+        fill(dc, RECT { left: l.apps.0 - sc(5), top: mid - sc(9), right: l.apps.0 - sc(5) + 1, bottom: mid + sc(9) }, pal().line, 0);
     }
 
     // tray apps
@@ -2520,8 +2525,9 @@ unsafe fn open_launcher() -> bool {
     true
 }
 
-/// The gear's menu: the UI style (saved for the other WinRust programs) and putting the windows side by side.
-unsafe fn style_menu() {
+/// The Style menu ("Bar style…" in the empty-spot right-click menu), opened at `cx`: the UI style (saved for the other
+/// WinRust programs), auto-hide, the panel's opacity and putting the windows side by side.
+unsafe fn style_menu(cx: i32) {
     let bar = BAR.load(Relaxed) as HWND;
     let names = [t!("Обычный", "Normal"), t!("Терминал", "Terminal"), t!("Плавающий док", "Floating dock"), t!("Тайлинг", "Tiling"), t!("Белая дорога", "White road")];
     let mut items: Vec<fly::MItem> = i18n::style::ALL.iter().zip(names).map(|(&s, n)| fly::MItem::new(n).on(s == style())).collect();
@@ -2534,7 +2540,7 @@ unsafe fn style_menu() {
     items.push(fly::MItem::new(t!("Прозрачная панель", "Clear bar")).on(op == 0));
     let head = (null_mut(), "\u{E713}", t!("Стиль", "Style").to_string(), t!("Вид панели и программ WinRust", "Look of the bar and the WinRust programs").to_string());
     let (tile, hide) = (i18n::style::ALL.len(), i18n::style::ALL.len() + 1);
-    fly::menu(tip_cx(&bar_layout(bar), GEAR), Some(head), items, move |i| match i18n::style::ALL.get(i) {
+    fly::menu(cx, Some(head), items, move |i| match i18n::style::ALL.get(i) {
         Some(&s) => {
             i18n::style::set_style(s);
             place(bar);
@@ -2591,7 +2597,6 @@ unsafe fn click(h: i32, left: bool, mid: bool) {
         WIFI_I => fly::toggle(if left { fly::Kind::Quick } else { fly::Kind::Wifi }), // right click: the network list
         VOL_I | BAT_I => fly::toggle(fly::Kind::Quick),
         CLOCK if left => fly::toggle(fly::Kind::Cal),
-        GEAR => style_menu(),
         TAPP..=-900 => {
             let slot = (h - TAPP) as usize;
             if slot == 0 {
@@ -2663,7 +2668,6 @@ unsafe fn min_rect(info: *mut ShellHookInfo, bar: HWND) {
 /// Screen x of the middle of a bar element, for its tooltip and menus.
 unsafe fn tip_cx(l: &Layout, h: i32) -> i32 {
     bar_x_w().0 + match h {
-        GEAR => (l.gear.0 + l.gear.1) / 2,
         SEARCH => l.x0 + l.bw / 2,
         CLOCK => (l.clock.0 + l.clock.1) / 2,
         LANG => l.sys.0 + sc(21),
@@ -2743,6 +2747,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         SNIP if wp == 1 => screenshot_notice(hwnd),
         SNIP if wp == 2 => clip_notice(hwnd),
         SNIP => clip::start(),
+        STYLE_MENU => style_menu(wp as i32),
+        NEXT_LANG => {
+            // Win+Space without explorer: the next input language, named in a tip over the bar (there is no button for it)
+            let (list, cur) = layouts();
+            if list.len() > 1 {
+                let next = list[list.iter().position(|&k| k == cur).map_or(0, |i| i + 1) % list.len()];
+                next_lang(hwnd);
+                KillTimer(hwnd, 2);
+                show_tip(layout_names(next).0, tip_cx(&bar_layout(hwnd), CLOCK));
+                SetTimer(hwnd, 6, 1200, None);
+            }
+        }
         VOLKEY => {
             if wp == 2 { toggle_mute() } else { add_volume(if wp == 0 { 4 } else { -4 }) }
             KillTimer(hwnd, 2);

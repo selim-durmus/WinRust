@@ -794,7 +794,15 @@ pub fn context_menu(x: i32) {
     if pu {
         items.insert(4, MItem::new(t!("Удалить мусор Windows (необратимо)", "Remove Windows junk (irreversible)")).danger());
     }
+    // the bar's own look (style, auto-hide, see-through panel): its only home now that the bar has no gear button
+    items.insert(0, MItem::new(t!("Стиль панели…", "Bar style…")));
     menu(x, None, items, move |i| unsafe {
+        if i == 0 {
+            // opened by the bar once this menu is gone (a menu does not open from inside another one's pick)
+            PostMessageW(FindWindowW(wide("topbar").as_ptr(), null()), crate::STYLE_MENU, x as usize, 0);
+            return;
+        }
+        let i = i - 1;
         let i = if pu && i > 4 { i - 1 } else if pu && i == 4 { 99 } else { i };
         match i {
             0 => open(&wide("ms-settings:")),
