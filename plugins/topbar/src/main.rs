@@ -1405,9 +1405,10 @@ struct Layout {
 fn layout(w: i32) -> Layout {
     let gap = sc(4);
     let clock = (w - sc(96), w - sc(6));
-    // language (42) + the wifi/volume pill: its icons end at 106, then the same 8 px as on its left; a battery adds
-    // its icon and percentage. Without one (a desktop) the pill ends right after the volume icon instead of leaving its slot empty.
-    let sys = (clock.0 - sc(4) - sc(if BAT.get().0 >= 0 { 216 } else { 114 }), clock.0 - sc(4));
+    // the wifi/volume pill (no language button: Win+Space switches the layout): its icons end at 62, then the same
+    // 8 px as on its left; a battery adds its icon and percentage. Without one (a desktop) the pill ends right after the
+    // volume icon instead of leaving its slot empty.
+    let sys = (clock.0 - sc(4) - sc(if BAT.get().0 >= 0 { 172 } else { 70 }), clock.0 - sc(4));
     let apps = (sys.0 - sc(24) * tray_count() as i32, sys.0);
     let margin = (w - apps.0) + sc(8); // keep the button group centered and clear of both sides
     let n = BTNS.with_borrow(|b| b.len()) as i32 + 1; // + the search slot
@@ -1431,7 +1432,7 @@ unsafe fn hit(hwnd: HWND, x: i32) -> i32 {
     }
     if x >= l.sys.0 {
         let d = x - l.sys.0;
-        return if d < sc(42) { LANG } else if d < sc(74) { WIFI_I } else if d < sc(106) { VOL_I } else { BAT_I };
+        return if d < sc(30) { WIFI_I } else if d < sc(62) { VOL_I } else { BAT_I };
     }
     if x >= l.apps.0 {
         return TAPP + (x - l.apps.0) / sc(24);
@@ -1921,15 +1922,6 @@ unsafe fn set_lang(bar: HWND, next: HKL) {
     SetTimer(bar, 7, 250, None);
 }
 
-unsafe fn lang_name() -> String {
-    let tid = GetWindowThreadProcessId(app_window(), null_mut());
-    let id = GetKeyboardLayout(tid) as usize as u32 & 0xffff;
-    let mut b = [0u16; 16];
-    let n = GetLocaleInfoW(id, 3, b.as_mut_ptr(), 16).max(1) as usize - 1; // LOCALE_SABBREVLANGNAME
-    let s = String::from_utf16_lossy(&b[..n]).to_uppercase();
-    if s == "ENU" { "ENG".into() } else { s }
-}
-
 thread_local! {
     static SIG: Cell<(u64, u32)> = const { Cell::new((0, 0)) }; // (hash of the last painted state, ticks since the last repaint)
 }
@@ -1939,7 +1931,7 @@ unsafe fn view_sig() -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     BTNS.with_borrow(|b| b.iter().for_each(|b| (b.pin, b.icon as usize, b.wins.iter().map(|&w| (w as usize, IsIconic(w))).collect::<Vec<_>>()).hash(&mut h)));
-    (GetForegroundWindow() as usize, BAT.get(), VOL.get(), WIFI.get(), INET.get(), EXPLORER_UP.load(Relaxed), clock_texts(), lang_name()).hash(&mut h);
+    (GetForegroundWindow() as usize, BAT.get(), VOL.get(), WIFI.get(), INET.get(), EXPLORER_UP.load(Relaxed), clock_texts()).hash(&mut h);
     TAPPS.with_borrow(|t| t.iter().for_each(|x| (x.hwnd as usize, x.uid, x.icon as usize, x.hidden, &x.tip).hash(&mut h)));
     h.finish()
 }
@@ -2176,17 +2168,14 @@ unsafe fn draw_bar(dc: HDC, cr: RECT, quality: u32) {
         }
     });
 
-    // system group: language on its own, then one pill for wifi + volume + battery (like Windows 11: they open one panel)
+    // system group: one pill for wifi + volume + battery (like Windows 11: they open one panel)
     let tb = RECT { left: l.sys.0, top, right: l.sys.1, bottom: bot };
-    glow(dc, LANG, hot == LANG, RECT { left: tb.left, top, right: tb.left + sc(42), bottom: bot }, pal().bg, pal().hover, sc(8));
-    let grp = RECT { left: tb.left + sc(44), top, right: tb.right, bottom: bot };
+    let grp = tb;
     let (tg, pg) = (hv(SYS_GRP, matches!(hot, WIFI_I | VOL_I | BAT_I) || fly::is_open(fly::Kind::Quick)), press_t(WIFI_I).max(press_t(VOL_I)).max(press_t(BAT_I)));
     if tg > 0.01 || pg > 0.0 {
         fill(dc, grp, mix(mix(pal().bg, pal().hover, tg), pal().accent, 0.5 * pg), sc(8));
     }
-    let mut x = tb.left + sc(10);
-    text(dc, &lang_name(), cell(x, sc(34)), pal().text, DT_LEFT);
-    x += sc(42);
+    let mut x = tb.left + sc(8);
     net_icon(dc, x + sc(9), mid, sc(17), f_glyph);
     x += sc(32);
     SelectObject(dc, f_glyph);
@@ -2643,9 +2632,9 @@ unsafe fn tip_cx(l: &Layout, h: i32) -> i32 {
         SEARCH => l.x0 + l.bw / 2,
         CLOCK => (l.clock.0 + l.clock.1) / 2,
         LANG => l.sys.0 + sc(21),
-        WIFI_I => l.sys.0 + sc(58),
-        VOL_I => l.sys.0 + sc(90),
-        BAT_I => l.sys.0 + sc(130),
+        WIFI_I => l.sys.0 + sc(14),
+        VOL_I => l.sys.0 + sc(46),
+        BAT_I => l.sys.0 + sc(86),
         t if (TAPP..TAPP + 100).contains(&t) => l.apps.0 + (t - TAPP) * sc(24) + sc(12),
         i => l.x0 + (i + 1) * (l.bw + l.gap) + l.bw / 2,
     }
