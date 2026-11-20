@@ -431,9 +431,13 @@ unsafe extern "system" fn fly_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
     match msg {
         WM_PAINT => {
             let mut ps: PAINTSTRUCT = zeroed();
-            let dc = BeginPaint(hwnd, &mut ps);
+            let wdc = BeginPaint(hwnd, &mut ps);
             let mut r: RECT = zeroed();
             GetClientRect(hwnd, &mut r);
+            // every frame is built off screen and copied in one go: drawing straight on the window showed the bare
+            // panel for a moment on each animation frame, so the icons flashed while they came in
+            let (dc, bmp) = (CreateCompatibleDC(wdc), CreateCompatibleBitmap(wdc, r.right, r.bottom));
+            let obmp = SelectObject(dc, bmp);
             fill(dc, r, pal().line, sc(12));
             fill(dc, RECT { left: 1, top: 1, right: r.right - 1, bottom: r.bottom - 1 }, pal().bg, sc(12));
             let (cols, _, _) = fly_size();
@@ -443,6 +447,8 @@ unsafe extern "system" fn fly_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             SetTextColor(dc, pal().dim);
             let mut tip = String::new();
             let over = over_idx();
+            let sz = sc(20);
+            let mut icons: Vec<(i32, i32, HICON, f32)> = Vec::new(); // icon's top left, icon, its opening progress
             TAPPS.with_borrow(|t| {
                 for (n, ti) in over.iter().map(|&i| &t[i]).enumerate() {
                     let (x, y) = (sc(8) + (n % cols) as i32 * sc(FCELL), sc(8) + (n / cols) as i32 * sc(FCELL));
@@ -451,11 +457,37 @@ unsafe extern "system" fn fly_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                         tip = ti.tip.clone();
                     }
                     if !ti.icon.is_null() {
-                        let sz = (sc(20) as f32 * (0.4 + 0.6 * tf_progress(n as i32))) as i32; // pops in
-                        DrawIconEx(dc, x + sc(19) - sz / 2, y + sc(18) - sz / 2, ti.icon, sz, sz, 0, null_mut(), DI_NORMAL);
+                        icons.push((x + sc(19) - sz / 2, y + sc(18) - sz / 2, ti.icon, tf_progress(n as i32)));
                     }
                 }
             });
+            if icons.iter().all(|i| i.3 >= 1.0) {
+                for &(x, y, ic, _) in &icons {
+                    DrawIconEx(dc, x, y, ic, sz, sz, 0, null_mut(), DI_NORMAL);
+                }
+            } else {
+                // opening: each icon fades in and rises into place, one after another. Always drawn at its final size:
+                // stretching a 16-32 px tray icon to a new size every frame looked choppy. The icons go on a copy of the
+                // panel first, then each one's square is blended over the panel at its own progress.
+                let (idc, ibmp) = (CreateCompatibleDC(wdc), CreateCompatibleBitmap(wdc, r.right, r.bottom));
+                let oi = SelectObject(idc, ibmp);
+                BitBlt(idc, 0, 0, r.right, r.bottom, dc, 0, 0, SRCCOPY);
+                for &(x, y, ic, _) in &icons {
+                    DrawIconEx(idc, x, y, ic, sz, sz, 0, null_mut(), DI_NORMAL);
+                }
+                for &(x, y, _, p) in &icons {
+                    if p >= 1.0 {
+                        BitBlt(dc, x, y, sz, sz, idc, x, y, SRCCOPY);
+                    } else if p > 0.0 {
+                        let rise = tf_slide(1.0 - (1.0 - p) * 0.4); // the last 40% of the flyout's own slide, ~6 px
+                        let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: (255.0 * p) as u8, AlphaFormat: 0 };
+                        AlphaBlend(dc, x, y + rise, sz, sz, idc, x, y, sz, sz, blend);
+                    }
+                }
+                SelectObject(idc, oi);
+                DeleteObject(ibmp);
+                DeleteDC(idc);
+            }
             if tip.is_empty() {
                 tip = if over.is_empty() { "No more icons".into() } else { "Middle click: move to the bar".into() };
             }
@@ -463,9 +495,14 @@ unsafe extern "system" fn fly_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             DrawTextW(dc, wide(&tip).as_ptr(), -1, &mut tr, DT_LEFT | DT_NOPREFIX | DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
             SelectObject(dc, of);
             DeleteObject(f);
+            BitBlt(wdc, 0, 0, r.right, r.bottom, dc, 0, 0, SRCCOPY);
+            SelectObject(dc, obmp);
+            DeleteObject(bmp);
+            DeleteDC(dc);
             EndPaint(hwnd, &ps);
             0
         }
+        WM_ERASEBKGND => 1, // WM_PAINT covers every pixel
         WM_MOUSEMOVE => {
             let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
             TrackMouseEvent(&mut tme);
