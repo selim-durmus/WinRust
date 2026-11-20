@@ -111,6 +111,38 @@ pub fn set_autohide(on: bool) {
     }
 }
 
+fn opacity_file() -> Option<PathBuf> {
+    std::env::var_os("ProgramData").map(|p| PathBuf::from(p).join("WinRust").join("bar-opacity.txt"))
+}
+
+/// How opaque the bar's background is, in percent: 100 = solid (no file, the default), 0 = fully clear (the wallpaper
+/// shows through; icons and text stay solid). Re-read once a second.
+pub fn bar_opacity() -> u8 {
+    if now_ms().saturating_sub(OPACITY_AT.load(Relaxed)) > 1000 {
+        OPACITY.store(parse_opacity(&opacity_file().and_then(|f| std::fs::read_to_string(f).ok()).unwrap_or_default()), Relaxed);
+        OPACITY_AT.store(now_ms(), Relaxed);
+    }
+    OPACITY.load(Relaxed)
+}
+
+/// Text of bar-opacity.txt -> percent; empty or not a number (no file, a hand edit) is solid.
+pub fn parse_opacity(s: &str) -> u8 {
+    s.trim().trim_end_matches('%').trim().parse::<u32>().map_or(100, |v| v.min(100) as u8)
+}
+
+static OPACITY: AtomicU8 = AtomicU8::new(100);
+static OPACITY_AT: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_bar_opacity(pct: u8) {
+    let pct = pct.min(100);
+    OPACITY.store(pct, Relaxed);
+    OPACITY_AT.store(now_ms(), Relaxed);
+    if let Some(f) = opacity_file() {
+        let _ = std::fs::create_dir_all(f.parent().unwrap());
+        let _ = std::fs::write(f, pct.to_string());
+    }
+}
+
 /// The broadcast message a window gets when the style changed: call `reload()` and repaint.
 pub fn msg() -> u32 {
     static M: AtomicU32 = AtomicU32::new(0);
@@ -266,6 +298,16 @@ pub fn icon_face() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opacity_text_and_junk_is_solid() {
+        assert_eq!(parse_opacity("0"), 0);
+        assert_eq!(parse_opacity(" 60%\r\n"), 60);
+        assert_eq!(parse_opacity("250"), 100);
+        assert_eq!(parse_opacity(""), 100);
+        assert_eq!(parse_opacity("-5"), 100);
+        assert_eq!(parse_opacity("clear"), 100);
+    }
 
     #[test]
     fn names_round_trip_and_junk_is_normal() {

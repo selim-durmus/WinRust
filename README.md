@@ -61,6 +61,8 @@ The gear at the left end of the bar opens **Style**. The choice applies at once 
 
 The choice is stored in `%ProgramData%\WinRust\style.txt`.
 
+The same menu sets the bar's panel: **Solid bar**, **Translucent bar** (50%) or **Clear bar** (the wallpaper shows through; icons, text and the clock stay solid, which also helps against burn-in on OLED screens). Any style can be made see-through. The opacity, in percent, is stored in `%ProgramData%\WinRust\bar-opacity.txt`; write another number there (for example `25`) for a different translucency.
+
 ## Benchmark
 
 One-off measurements on one machine (Windows 11 IoT Enterprise 10.0.26300, RTX 4060 Laptop, NTFS). Treat them as orders of magnitude, not lab numbers.

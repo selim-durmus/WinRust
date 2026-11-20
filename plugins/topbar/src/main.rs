@@ -1842,15 +1842,37 @@ unsafe fn clock_texts() -> (String, String) {
 }
 
 unsafe fn paint(hwnd: HWND) {
+    let opacity = i18n::style::bar_opacity();
+    let layered = sync_layered(hwnd, opacity < 100);
     let mut ps: PAINTSTRUCT = zeroed();
     let wdc = BeginPaint(hwnd, &mut ps);
     let mut cr: RECT = zeroed();
     GetClientRect(hwnd, &mut cr);
     let h = cr.bottom;
     BUSY.set(false);
-    let (dc, bmp) = (CreateCompatibleDC(wdc), CreateCompatibleBitmap(wdc, cr.right, h));
-    let old = SelectObject(dc, bmp);
-    // frosted-glass look: a hairline on top, a faint light catch under it, then the panel colour fading in
+    if layered {
+        paint_layered(hwnd, wdc, cr, opacity);
+    } else {
+        let (dc, bmp) = (CreateCompatibleDC(wdc), CreateCompatibleBitmap(wdc, cr.right, h));
+        let old = SelectObject(dc, bmp);
+        bar_background(dc, cr);
+        draw_bar(dc, cr, 5); // CLEARTYPE_QUALITY
+        BitBlt(wdc, 0, 0, cr.right, h, dc, 0, 0, SRCCOPY);
+        SelectObject(dc, old);
+        DeleteObject(bmp);
+        DeleteDC(dc);
+    }
+    if BUSY.get() {
+        SetTimer(hwnd, 4, 16, None); // next animation frame
+    } else {
+        KillTimer(hwnd, 4);
+    }
+    EndPaint(hwnd, &ps);
+}
+
+/// The solid bar's panel: frosted-glass look, a hairline on top, a faint light catch under it, then the panel colour fading in.
+unsafe fn bar_background(dc: HDC, cr: RECT) {
+    let h = cr.bottom;
     let lit = mix(pal().bg, pal().text, 0.045);
     for y in 0..h {
         fill(dc, RECT { left: 0, top: y, right: cr.right, bottom: y + 1 }, mix(lit, pal().bg, (y as f32 / sc(18) as f32).min(1.0)), 0);
@@ -1861,9 +1883,94 @@ unsafe fn paint(hwnd: HWND) {
     if !at_top() {
         fill(dc, RECT { left: 0, top: 1, right: cr.right, bottom: 2 }, mix(pal().bg, pal().text, 0.08), 0);
     }
+}
+
+/// Turns the bar into a per-pixel-alpha layered window (see-through background) or back into a plain one.
+/// Returns whether it is layered now.
+unsafe fn sync_layered(hwnd: HWND, want: bool) -> bool {
+    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    let has = ex & WS_EX_LAYERED as isize != 0;
+    if want != has {
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, if want { ex | WS_EX_LAYERED as isize } else { ex & !(WS_EX_LAYERED as isize) });
+        if !want {
+            InvalidateRect(hwnd, null(), 0); // back to normal painting: the whole bar, not just the dirty part
+        }
+    }
+    want
+}
+
+/// A top-down 32-bit DIB of `w` x `h` selected into a new memory DC: (dc, bitmap, old bitmap, pixels as BGRA bytes).
+unsafe fn dib(wdc: HDC, w: i32, h: i32) -> (HDC, HBITMAP, HGDIOBJ, *mut u8) {
+    let mut bi: BITMAPINFO = zeroed();
+    bi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h; // top-down
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    let mut bits: *mut core::ffi::c_void = null_mut();
+    let bmp = CreateDIBSection(wdc, &bi, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+    let dc = CreateCompatibleDC(wdc);
+    let old = SelectObject(dc, bmp);
+    (dc, bmp, old, bits as *mut u8)
+}
+
+/// The see-through bar. GDI cannot draw alpha, so the bar's content is drawn twice, over black and over white:
+/// where the two agree the pixel is solid, where they differ it is see-through by that much (anti-aliased text and
+/// icon edges come out right). Under that goes the panel colour at `opacity` percent, and the result goes to the screen
+/// through UpdateLayeredWindow.
+unsafe fn paint_layered(hwnd: HWND, wdc: HDC, cr: RECT, opacity: u8) {
+    let (w, h) = (cr.right, cr.bottom);
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let (bdc, bbmp, bold, bpx) = dib(wdc, w, h);
+    let (wtdc, wbmp, wold, wpx) = dib(wdc, w, h);
+    if !bpx.is_null() && !wpx.is_null() {
+        FillRect(bdc, &cr, GetStockObject(BLACK_BRUSH) as HBRUSH);
+        FillRect(wtdc, &cr, GetStockObject(WHITE_BRUSH) as HBRUSH);
+        draw_bar(bdc, cr, 4); // ANTIALIASED_QUALITY: ClearType's coloured fringes would not survive the alpha
+        draw_bar(wtdc, cr, 4);
+        GdiFlush();
+        let n = (w * h) as usize * 4;
+        let (b, wt) = (std::slice::from_raw_parts_mut(bpx, n), std::slice::from_raw_parts(wpx, n));
+        let edge = if at_top() { h - 1 } else { 0 };
+        compose(b, wt, w as usize, edge as usize, opacity);
+        let (size, src) = (SIZE { cx: w, cy: h }, POINT { x: 0, y: 0 });
+        let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+        UpdateLayeredWindow(hwnd, null_mut(), null(), &size, bdc, &src, 0, &blend, ULW_ALPHA);
+    }
+    for (dc, bmp, old) in [(bdc, bbmp, bold), (wtdc, wbmp, wold)] {
+        SelectObject(dc, old);
+        DeleteObject(bmp);
+        DeleteDC(dc);
+    }
+}
+
+/// Premultiplied BGRA for the see-through bar, written over `black`: the content (drawn over black and over white)
+/// on top of the panel colour at `opacity` percent. Row `edge` gets the hairline colour. The panel never goes fully
+/// clear (alpha 1 at least): fully clear pixels of a layered window let clicks through to whatever is behind it.
+fn compose(black: &mut [u8], white: &[u8], w: usize, edge: usize, opacity: u8) {
+    let ta = (opacity.min(100) as u32 * 255 / 100).max(1);
+    let premul = |c: u32| [((c >> 16) & 255) * ta / 255, ((c >> 8) & 255) * ta / 255, (c & 255) * ta / 255]; // COLORREF -> B, G, R
+    let (panel, line) = (premul(pal().bg), premul(pal().line));
+    for (i, (b, wt)) in black.chunks_exact_mut(4).zip(white.chunks_exact(4)).enumerate() {
+        let tint = if w > 0 && i / w == edge { line } else { panel };
+        // how much the white showed through, averaged over the channels: 0 = solid, 255 = not drawn on
+        let through = (0..3).map(|k| (wt[k] as u32).saturating_sub(b[k] as u32)).sum::<u32>() / 3;
+        let a = 255 - through.min(255);
+        for k in 0..3 {
+            b[k] = ((b[k] as u32).min(a) + tint[k] * (255 - a) / 255) as u8;
+        }
+        b[3] = (a + ta * (255 - a) / 255) as u8;
+    }
+}
+
+/// Everything on the bar but its panel: buttons, icons, tray, clock. `quality` is the fonts' GDI quality.
+unsafe fn draw_bar(dc: HDC, cr: RECT, quality: u32) {
+    let h = cr.bottom;
     SetBkMode(dc, TRANSPARENT as i32);
     let (face, gface) = (wide(ui_face()), wide(winrust_common::style::icon_face()));
-    let font = |f: &[u16], px: i32, wt: i32| CreateFontW(-sc(px), 0, 0, 0, wt, 0, 0, 0, 1, 0, 0, 5, 0, f.as_ptr());
+    let font = |f: &[u16], px: i32, wt: i32| CreateFontW(-sc(px), 0, 0, 0, wt, 0, 0, 0, 1, 0, 0, quality, 0, f.as_ptr());
     let (f_txt, f_small, f_glyph, f_bold) = (font(&face, 13, 400), font(&face, 12, 400), font(&gface, 16, 400), font(&face, 13, 600));
     let of = SelectObject(dc, f_txt);
 
@@ -1995,20 +2102,10 @@ unsafe fn paint(hwnd: HWND) {
     SelectObject(dc, f_small);
     text(dc, &dt, RECT { left: cb.left, top: mid - sc(1), right: cb.right, bottom: cb.bottom }, mix(pal().dim, pal().text, 0.35), DT_CENTER);
 
-    BitBlt(wdc, 0, 0, cr.right, h, dc, 0, 0, SRCCOPY);
     SelectObject(dc, of);
     for f in [f_txt, f_small, f_glyph, f_bold] {
         DeleteObject(f);
     }
-    SelectObject(dc, old);
-    DeleteObject(bmp);
-    DeleteDC(dc);
-    if BUSY.get() {
-        SetTimer(hwnd, 4, 16, None); // next animation frame
-    } else {
-        KillTimer(hwnd, 4);
-    }
-    EndPaint(hwnd, &ps);
 }
 
 // ---------- input ----------
@@ -2292,18 +2389,34 @@ unsafe fn style_menu() {
     let mut items: Vec<fly::MItem> = i18n::style::ALL.iter().zip(names).map(|(&s, n)| fly::MItem::new(n).on(s == style())).collect();
     items.push(fly::MItem::new(t!("Разложить окна плиткой", "Tile the windows")).sep());
     items.push(fly::MItem::new(t!("Скрывать панель автоматически", "Hide the bar automatically")).on(i18n::style::autohide()));
+    // the panel behind the buttons: solid, translucent or clear (the wallpaper shows through; good on OLED screens)
+    let op = i18n::style::bar_opacity();
+    items.push(fly::MItem::new(t!("Сплошная панель", "Solid bar")).on(op == 100).sep());
+    items.push(fly::MItem::new(t!("Полупрозрачная панель", "Translucent bar")).on((1..100).contains(&op)));
+    items.push(fly::MItem::new(t!("Прозрачная панель", "Clear bar")).on(op == 0));
     let head = (null_mut(), "\u{E713}", t!("Стиль", "Style").to_string(), t!("Вид панели и программ WinRust", "Look of the bar and the WinRust programs").to_string());
-    let tile = i18n::style::ALL.len();
+    let (tile, hide) = (i18n::style::ALL.len(), i18n::style::ALL.len() + 1);
     fly::menu(tip_cx(&bar_layout(bar), GEAR), Some(head), items, move |i| match i18n::style::ALL.get(i) {
         Some(&s) => {
             i18n::style::set_style(s);
             place(bar);
         }
         None if i == tile => tile_windows(),
-        None => {
+        None if i == hide => {
             i18n::style::set_autohide(!i18n::style::autohide());
             place(bar); // the reserved strip comes or goes with it
             bar_anim(bar);
+        }
+        None => {
+            // a hand-set translucency (bar-opacity.txt) stays when Translucent is picked again
+            let pct = match i - hide {
+                1 => 100,
+                2 if (1..100).contains(&op) => op,
+                2 => 50,
+                _ => 0,
+            };
+            i18n::style::set_bar_opacity(pct);
+            InvalidateRect(bar, null(), 0);
         }
     });
 }
