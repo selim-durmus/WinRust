@@ -2039,8 +2039,10 @@ unsafe fn draw_bar(dc: HDC, cr: RECT, quality: u32) {
         }
     });
 
-    // a hairline between the app buttons and the tray side
-    fill(dc, RECT { left: l.apps.0 - sc(5), top: mid - sc(9), right: l.apps.0 - sc(5) + 1, bottom: mid + sc(9) }, pal().line, 0);
+    // a hairline between the app buttons and the tray side (not on the clear bar: nothing to divide, it would float alone)
+    if i18n::style::bar_opacity() > 0 {
+        fill(dc, RECT { left: l.apps.0 - sc(5), top: mid - sc(9), right: l.apps.0 - sc(5) + 1, bottom: mid + sc(9) }, pal().line, 0);
+    }
 
     // tray apps
     glow(dc, TAPP, hot == TAPP, cell(l.apps.0, sc(24)), pal().bg, pal().hover, sc(8));
