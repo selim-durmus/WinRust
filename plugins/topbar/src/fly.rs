@@ -104,6 +104,7 @@ thread_local! {
     static CONNECTING: RefCell<Option<(String, u64)>> = const { RefCell::new(None) }; // the network being joined and since when: its row animates
     static CTX: RefCell<Option<(String, i32, i32, u64)>> = const { RefCell::new(None) }; // Wi-Fi right-click menu: network (by name: the list reorders), x, y (px), opened at
     static QUERY: RefCell<String> = const { RefCell::new(String::new()) };
+    static CARET: Cell<(usize, usize)> = const { Cell::new((0, 0)) }; // Start search box: caret and selection anchor (char indices)
     static SCROLL: Cell<usize> = const { Cell::new(0) };
     static ICONS: RefCell<HashMap<Vec<u16>, HICON>> = RefCell::new(HashMap::new()); // by path: the app list is reloaded and reordered
     static SEL: Cell<usize> = const { Cell::new(0) }; // Start: the row Enter opens (arrow keys move it)
@@ -896,6 +897,7 @@ pub fn toggle(k: Kind) {
         HV.with_borrow_mut(|m| m.retain(|k, _| *k < 1_000_000)); // flyout keys are >= 1_000_000: no stale glow from the last panel
         CTX.set(None);
         QUERY.set(String::new());
+        CARET.set((0, 0));
         SCROLL.set(0);
         SEL.set(0);
         PASS.set(None);
@@ -973,6 +975,73 @@ unsafe fn wifi_radio_wlan(on: bool) {
         let s = WLAN_PHY_RADIO_STATE { dwPhyIndex: 0, dot11SoftwareRadioState: if on { dot11_radio_state_on } else { dot11_radio_state_off }, dot11HardwareRadioState: dot11_radio_state_on };
         WlanSetInterface(h, g, wlan_intf_opcode_radio_state, size_of::<WLAN_PHY_RADIO_STATE>() as u32, &s as *const _ as *const _, null());
     });
+}
+
+/// Runs an edit on the Start search box (QUERY + its caret and anchor); returns what `f` returns.
+fn field<R>(f: impl FnOnce(&mut crate::edit::Field) -> R) -> R {
+    QUERY.with_borrow_mut(|q| {
+        let (caret, anchor) = CARET.get();
+        let mut e = crate::edit::Field { text: q, caret, anchor };
+        e.clamp();
+        let r = f(&mut e);
+        CARET.set((e.caret, e.anchor));
+        r
+    })
+}
+
+/// The clipboard's text (CF_UNICODETEXT), if any.
+unsafe fn clip_text(hw: HWND) -> Option<String> {
+    use windows_sys::Win32::System::{
+        DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard},
+        Memory::{GlobalLock, GlobalUnlock},
+    };
+    if OpenClipboard(hw) == 0 {
+        return None;
+    }
+    let h = GetClipboardData(13); // CF_UNICODETEXT
+    let mut out = None;
+    if !h.is_null() {
+        let p = GlobalLock(h) as *const u16;
+        if !p.is_null() {
+            let mut n = 0;
+            while *p.add(n) != 0 {
+                n += 1;
+            }
+            out = Some(String::from_utf16_lossy(std::slice::from_raw_parts(p, n)));
+            GlobalUnlock(h);
+        }
+    }
+    CloseClipboard();
+    out
+}
+
+/// Puts `s` on the clipboard as text.
+unsafe fn set_clip_text(hw: HWND, s: &str) {
+    use windows_sys::Win32::System::{
+        DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
+        Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock}, // GlobalFree is in Foundation
+    };
+    let w = wide(s);
+    let h = GlobalAlloc(GMEM_MOVEABLE, w.len() * 2);
+    if h.is_null() {
+        return;
+    }
+    let p = GlobalLock(h) as *mut u16;
+    if p.is_null() {
+        GlobalFree(h);
+        return;
+    }
+    std::ptr::copy_nonoverlapping(w.as_ptr(), p, w.len());
+    GlobalUnlock(h);
+    if OpenClipboard(hw) == 0 {
+        GlobalFree(h);
+        return;
+    }
+    EmptyClipboard();
+    if SetClipboardData(13, h).is_null() {
+        GlobalFree(h); // not taken: still ours
+    }
+    CloseClipboard();
 }
 
 /// Starts the i-th app of the filtered Start list and counts the launch (search ranks by it). false = no such row.
@@ -1586,11 +1655,34 @@ unsafe fn paint(hw: HWND, k: Kind) {
             text(dc, "\u{E721}", r(28, 20, 56, 56), pal().dim, DT_CENTER);
             SelectObject(dc, f_txt);
             let q = QUERY.with_borrow(|q| q.clone());
+            // the search box: text, selection and caret, scrolled so the caret stays in view
+            let tb = r(64, 20, w - 64, 56);
+            let chars: Vec<char> = q.chars().collect();
+            let (caret, anchor) = CARET.get();
+            let (caret, anchor) = (caret.min(chars.len()), anchor.min(chars.len()));
+            let px = |i: usize| {
+                let s: Vec<u16> = chars[..i].iter().collect::<String>().encode_utf16().collect();
+                let mut sz: SIZE = zeroed();
+                GetTextExtentPoint32W(dc, s.as_ptr(), s.len() as i32, &mut sz);
+                sz.cx
+            };
+            let shift = (px(caret) - (tb.right - tb.left) + sc(2)).max(0);
+            let saved = SaveDC(dc);
+            IntersectClipRect(dc, tb.left, tb.top, tb.right, tb.bottom);
+            let mid = (tb.top + tb.bottom) / 2;
             if q.is_empty() {
-                text(dc, "Type to search apps", r(64, 20, w - 64, 56), pal().dim, DT_LEFT);
+                text(dc, "Type to search apps", tb, pal().dim, DT_LEFT);
             } else {
-                text(dc, &q, r(64, 20, w - 64, 56), pal().text, DT_LEFT);
+                let (a, b) = (caret.min(anchor), caret.max(anchor));
+                if a != b {
+                    let sel = RECT { left: tb.left + px(a) - shift, top: mid - sc(10), right: tb.left + px(b) - shift, bottom: mid + sc(10) };
+                    fill(dc, sel, mix(card, pal().accent, 0.45), 0);
+                }
+                text(dc, &q, RECT { left: tb.left - shift, right: tb.left - shift + px(chars.len()) + sc(8), ..tb }, pal().text, DT_LEFT);
             }
+            let cx = tb.left + px(caret) - shift;
+            fill(dc, RECT { left: cx, top: mid - sc(9), right: cx + sc(1).max(1), bottom: mid + sc(9) }, pal().text, 0); // caret
+            RestoreDC(dc, saved);
             if let Some((kr, ka)) = rects(k).into_iter().find(|(_, a)| *a == Act::Keyboard) {
                 g(ka, kr, card, mix(card, pal().text, 0.1), sc(14));
                 SelectObject(dc, f_glyph);
@@ -1797,6 +1889,35 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                 InvalidateRect(hw, null(), 0);
             }
         }
+        WM_KEYDOWN if k == Kind::Start && [VK_LEFT, VK_RIGHT, VK_HOME, VK_END, VK_DELETE].contains(&(wp as u16)) => {
+            // caret keys in the search box: Shift extends the selection, Ctrl moves / deletes by word
+            let (ctrl, shift) = (GetKeyState(VK_CONTROL as i32) < 0, GetKeyState(VK_SHIFT as i32) < 0);
+            let changed = field(|f| match wp as u16 {
+                VK_LEFT => {
+                    f.left(ctrl, shift);
+                    false
+                }
+                VK_RIGHT => {
+                    f.right(ctrl, shift);
+                    false
+                }
+                VK_HOME => {
+                    f.home(shift);
+                    false
+                }
+                VK_END => {
+                    f.end(shift);
+                    false
+                }
+                _ => f.delete(ctrl),
+            });
+            if changed {
+                SCROLL.set(0);
+                SEL.set(0);
+                find_loose_exes(hw);
+            }
+            InvalidateRect(hw, null(), 0);
+        }
         WM_CHAR => {
             let c = wp as u32;
             if c == 27 {
@@ -1806,6 +1927,7 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                     PASS.set(None);
                 } else if k == Kind::Start && QUERY.with_borrow(|q| !q.is_empty()) {
                     QUERY.set(String::new()); // Esc clears the search first, the next one closes
+                    CARET.set((0, 0));
                     SCROLL.set(0);
                     SEL.set(0);
                 } else {
@@ -1832,16 +1954,41 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                         return 0;
                     }
                 } else {
-                    QUERY.with_borrow_mut(|q| {
-                        if c == 8 {
-                            q.pop();
-                        } else if let Some(ch) = char::from_u32(c).filter(|_| c >= 32) {
-                            q.push(ch);
+                    // like a Windows edit box: Backspace / Ctrl+Backspace (127), Ctrl+A / C / X / V, typing replaces the selection
+                    let changed = field(|f| match c {
+                        8 => f.backspace(false),
+                        127 => f.backspace(true),
+                        1 => {
+                            f.select_all();
+                            false
                         }
+                        3 | 24 => {
+                            let s = f.selected();
+                            if !s.is_empty() {
+                                set_clip_text(hw, &s);
+                            }
+                            c == 24 && f.backspace(false)
+                        }
+                        22 => match clip_text(hw) {
+                            Some(s) => {
+                                f.insert(&s.replace(['\r', '\n', '\t'], " "));
+                                true
+                            }
+                            None => false,
+                        },
+                        _ => match char::from_u32(c).filter(|_| c >= 32) {
+                            Some(ch) => {
+                                f.insert(&ch.to_string());
+                                true
+                            }
+                            None => false,
+                        },
                     });
-                    SCROLL.set(0);
-                    SEL.set(0);
-                    find_loose_exes(hw);
+                    if changed {
+                        SCROLL.set(0);
+                        SEL.set(0);
+                        find_loose_exes(hw);
+                    }
                 }
             }
             InvalidateRect(hw, null(), 0);
