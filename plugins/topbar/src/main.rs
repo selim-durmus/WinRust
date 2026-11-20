@@ -403,11 +403,14 @@ fn toggle_shown(key: &str) {
 
 const FCELL: i32 = 38;
 
-/// (columns, window width, window height) for the current number of icons.
+/// (columns, window width, window height) for the current number of icons: just the icon grid with even padding,
+/// plus a text line only when there is nothing to show.
 fn fly_size() -> (usize, i32, i32) {
-    let n = over_idx().len().max(1);
+    let real = over_idx().len();
+    let n = real.max(1);
     let cols = n.min(6);
-    (cols, sc(FCELL) * cols as i32 + sc(16), sc(FCELL) * n.div_ceil(cols) as i32 + sc(16) + sc(26))
+    let note = if real == 0 { sc(26) } else { 0 };
+    (cols, sc(FCELL) * cols as i32 + sc(16), sc(FCELL) * n.div_ceil(cols) as i32 + sc(16) + note)
 }
 
 unsafe fn fly_toggle() {
@@ -491,7 +494,6 @@ unsafe extern "system" fn fly_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             let of = SelectObject(dc, f);
             SetBkMode(dc, TRANSPARENT as i32);
             SetTextColor(dc, pal().dim);
-            let mut tip = String::new();
             let over = over_idx();
             let mut icons: Vec<(i32, i32, i32, HICON, f32)> = Vec::new(); // icon's top left, size, icon, opening progress
             TAPPS.with_borrow(|t| {
@@ -499,11 +501,11 @@ unsafe extern "system" fn fly_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     let (x, y) = (sc(8) + (n % cols) as i32 * sc(FCELL), sc(8) + (n / cols) as i32 * sc(FCELL));
                     if FHOT.get() == n as i32 {
                         fill(dc, RECT { left: x, top: y, right: x + sc(FCELL), bottom: y + sc(FCELL) }, pal().hover, sc(6));
-                        tip = ti.tip.clone();
                     }
                     if !ti.icon.is_null() {
                         let sz = fly_icon_px(ti.isz);
-                        icons.push((x + sc(19) - sz / 2, y + sc(18) - sz / 2, sz, ti.icon, tf_progress(n as i32)));
+                        let c = sc(FCELL) / 2; // centred in its cell
+                        icons.push((x + c - sz / 2, y + c - sz / 2, sz, ti.icon, tf_progress(n as i32)));
                     }
                 }
             });
@@ -534,11 +536,11 @@ unsafe extern "system" fn fly_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 DeleteObject(ibmp);
                 DeleteDC(idc);
             }
-            if tip.is_empty() {
-                tip = if over.is_empty() { "No more icons".into() } else { String::new() }; // the hovered icon's name shows here
+            if over.is_empty() {
+                // the only text left: nothing in the flyout (its own line, see fly_size)
+                let mut tr = RECT { left: sc(10), top: r.bottom - sc(26), right: r.right - sc(10), bottom: r.bottom - sc(4) };
+                DrawTextW(dc, wide("No more icons").as_ptr(), -1, &mut tr, DT_LEFT | DT_NOPREFIX | DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
             }
-            let mut tr = RECT { left: sc(10), top: r.bottom - sc(26), right: r.right - sc(10), bottom: r.bottom - sc(4) };
-            DrawTextW(dc, wide(&tip).as_ptr(), -1, &mut tr, DT_LEFT | DT_NOPREFIX | DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
             SelectObject(dc, of);
             DeleteObject(f);
             BitBlt(wdc, 0, 0, r.right, r.bottom, dc, 0, 0, SRCCOPY);
