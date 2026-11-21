@@ -1429,11 +1429,16 @@ fn layout(w: i32) -> Layout {
     // Windows 11: 44 px slots side by side, no gap (the highlight's own inset separates them); narrower when crowded
     let gap = 0;
     let bw = (((w - 2 * margin + gap) / n.max(1)) - gap).clamp(sc(16), sc(BTN_W));
-    // centered on search + Start + pins only: opening an unpinned window adds a button on the right instead of shifting Start left
-    let fixed = (PINS.with_borrow(|p| p.len()) as i32 + 2).min(n);
-    // ...but never so far right that the windows' buttons run into the tray: then the whole row shifts left
-    let right_limit = w - margin - (n * (bw + gap) - gap);
-    Layout { x0: ((w - (fixed * (bw + gap) - gap)) / 2).min(right_limit).max(sc(6)), bw, gap, apps, sys, clock }
+    Layout { x0: row_x0(w, n, bw, gap, margin, sc(6)), bw, gap, apps, sys, clock }
+}
+
+/// Left edge of the button row (search, Start, pins, open windows: `n` slots of `bw` + `gap`) on a bar `w` wide.
+/// Like Windows 11 the whole row is centred on the bar and re-centres as windows open and close (it used to centre
+/// search + Start + pins only, so every open app pushed the row right of centre). Never so far right that it runs into
+/// the tray (`margin` from the right edge), never left of `min_x`.
+fn row_x0(w: i32, n: i32, bw: i32, gap: i32, margin: i32, min_x: i32) -> i32 {
+    let row = n * (bw + gap) - gap;
+    ((w - row) / 2).min(w - margin - row).max(min_x)
 }
 
 unsafe fn hit(hwnd: HWND, x: i32) -> i32 {
@@ -3035,6 +3040,20 @@ mod tests {
         assert!(at(-1, true) == Link::Cable);
         assert!(at(-1, false) == Link::Offline); // nothing at all: the crossed-out wifi icon
         assert_eq!((arcs_lit(0), arcs_lit(40), arcs_lit(100)), (1, 2, 3));
+    }
+
+    #[test]
+    fn app_row_is_centred_and_recentres() {
+        let x0 = |n| super::row_x0(2560, n, 44, 0, 300, 6);
+        for n in [3, 9, 10, 15] {
+            let row = n * 44;
+            assert_eq!(x0(n) + row / 2, 2560 / 2, "row of {n} centred on the bar"); // even widths: exact
+        }
+        assert!(x0(10) < x0(9)); // one more app: the row grows to both sides, Start moves left
+        // too many to centre: the row stops short of the tray (300 px from the right edge)
+        assert_eq!(x0(50) + 50 * 44, 2560 - 300);
+        // even more: never past the left edge
+        assert_eq!(super::row_x0(800, 50, 44, 0, 300, 6), 6);
     }
 
     #[test]
