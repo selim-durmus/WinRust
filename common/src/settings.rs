@@ -79,6 +79,12 @@ pub fn open(uri: &str) {
             return;
         }
     }
+    open_windows(uri);
+}
+
+/// Always Windows' own Settings, also for the pages rust-settings has (the Start search: someone who looks up
+/// "Installed apps" wants the full Windows page, with Store apps, sizes and app options).
+pub fn open_windows(uri: &str) {
     // the Explorer start is shared (crate::shell: the normal user token, also from the elevated bar)
     let ps = PS.replace("__START_EXPLORER__", crate::shell::START_EXPLORER_PS);
     let _ = Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps])

@@ -1,6 +1,7 @@
 //! Windows Settings pages for the Start search: name, `ms-settings:` link, and the words people search them by
 //! ("add or remove programs" finds Installed apps). Windows' own settings index (ImmersiveControlPanel\Settings\
 //! AllSystemSettings_*.xml) has no links to open its entries, so the list is kept here (Windows 11 page names).
+//! Found in Start they always open in Windows Settings (`settings::open_windows`), also the pages rust-settings has.
 
 /// (name as in Settings, link, search words separated by ';')
 pub const PAGES: &[(&str, &str, &str)] = &[
@@ -26,7 +27,7 @@ pub const PAGES: &[(&str, &str, &str)] = &[
     ("Remote Desktop", "ms-settings:remotedesktop", "rdp;remote access"),
     ("Clipboard", "ms-settings:clipboard", "clipboard history;copy paste;sync clipboard"),
     ("About", "ms-settings:about", "pc name;rename this pc;device specifications;system info;windows version;ram;processor"),
-    ("Optional features", "ms-settings:optionalfeatures", "add a feature;windows features;more windows features"),
+    ("Optional features", "ms-settings:optionalfeatures", "add a feature;windows features;more windows features;turn windows features on or off;programs and features"),
     // Bluetooth & devices
     ("Bluetooth & devices", "ms-settings:bluetooth", "pair;add device;connect headphones;bluetooth"),
     ("Devices", "ms-settings:connecteddevices", "connected devices;device list"),
@@ -63,7 +64,7 @@ pub const PAGES: &[(&str, &str, &str)] = &[
     // Apps
     ("Installed apps", "ms-settings:appsfeatures", "add or remove programs;uninstall;programs and features;apps & features;remove apps"),
     ("Default apps", "ms-settings:defaultapps", "default browser;file associations;open with;default programs"),
-    ("Advanced app settings", "ms-settings:advanced-apps", "app execution aliases;choose where to get apps;archive apps"),
+    ("Advanced app settings", "ms-settings:advanced-apps", "app execution aliases;choose where to get apps;archive apps;install programs from anywhere;programs"),
     ("Offline maps", "ms-settings:maps", "maps"),
     ("Apps for websites", "ms-settings:appsforwebsites", "open links in apps"),
     ("Video playback", "ms-settings:videoplayback", "hdr video;video quality"),

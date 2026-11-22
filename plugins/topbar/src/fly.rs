@@ -1050,10 +1050,15 @@ unsafe fn set_clip_text(hw: HWND, s: &str) {
 /// Starts the i-th app of the filtered Start list and counts the launch (search ranks by it). false = no such row.
 unsafe fn launch(i: usize) -> bool {
     let Some(app) = filtered().get(i).and_then(|&ai| APPS.lock().unwrap().get(ai).cloned()) else { return false };
-    if wstr(&app.1).starts_with("shell:") || crate::winset::is_page(&wstr(&app.1)) {
+    let path = wstr(&app.1);
+    if path.starts_with("shell:") || crate::winset::is_page(&path) {
         bump_name(&app.0); // open() counts only .lnk files
     }
-    open(&app.1);
+    if crate::winset::is_page(&path) {
+        winrust_common::settings::open_windows(&path); // a settings page found in Start: the full Windows page, not rust-settings
+    } else {
+        open(&app.1);
+    }
     true
 }
 
@@ -2045,5 +2050,9 @@ mod tests {
         assert_eq!(super::page_score(&apps, "wallpaper"), None);
         assert_eq!(super::page_score(&super::wide("ms-settings:personalization-background"), "wallpaper"), Some(1));
         assert_eq!(super::page_score(&super::wide(r"C:\a\Uninstall.lnk"), "uninst"), None); // only settings pages have search words
+        // what Windows' own Settings search lists for "programs"
+        for link in ["appsfeatures", "defaultapps", "advanced-apps", "optionalfeatures"] {
+            assert!(super::page_score(&super::wide(&format!("ms-settings:{link}")), "programs").is_some(), "{link}");
+        }
     }
 }
