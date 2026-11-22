@@ -1078,16 +1078,10 @@ fn msix_family(target: &str) -> Option<(String, String)> {
     (parts.len() == 5).then(|| (format!("{}_{}", parts[0], parts[4]), rest.to_string()))
 }
 
-/// A pin of a Store (MSIX) app points into its versioned package folder, which is gone after every app update
-/// ("Windows cannot find ...\Claude_5.11492.5.0_x64__...\claude.exe"). Re-points the .lnk to the installed version.
-/// Returns the new target (lower-case), None if the target exists or is not in a package.
-unsafe fn fix_msix_pin(lnk: &[u16], target: &str) -> Option<String> {
+/// Install folder of the installed package of a family ("claude_pzs8"); None when the app is not installed.
+unsafe fn package_dir(family: &str) -> Option<PathBuf> {
     use windows_sys::Win32::Storage::Packaging::Appx::{GetPackagePathByFullName, GetPackagesByPackageFamily};
-    if target.is_empty() || std::path::Path::new(target).exists() {
-        return None;
-    }
-    let (family, rest) = msix_family(target)?;
-    let fam = wide(&family);
+    let fam = wide(family);
     let (mut count, mut len) = (0u32, 0u32);
     GetPackagesByPackageFamily(fam.as_ptr(), &mut count, null_mut(), &mut len, null_mut()); // sizes only
     if count == 0 {
@@ -1102,7 +1096,36 @@ unsafe fn fix_msix_pin(lnk: &[u16], target: &str) -> Option<String> {
     if GetPackagePathByFullName(names[0], &mut plen, path.as_mut_ptr()) != 0 {
         return None;
     }
-    let new = std::path::Path::new(&wstr_of(&path)).join(&rest);
+    Some(PathBuf::from(wstr_of(&path)))
+}
+
+/// `Executable` of the `<Application Id="...">` in an AppxManifest.xml ("TranslucentTB.exe", "app\claude.exe").
+fn manifest_exe(xml: &str, app_id: &str) -> Option<String> {
+    let attr = |tag: &str, name: &str| -> Option<String> {
+        let at = tag.find(&format!(" {name}=\""))? + name.len() + 3;
+        Some(tag[at..].split('"').next()?.to_string())
+    };
+    xml.split("<Application ").skip(1).map(|t| format!(" {}", &t[..t.find('>').unwrap_or(t.len())])).find(|t| attr(t, "Id").as_deref() == Some(app_id)).and_then(|t| attr(&t, "Executable"))
+}
+
+/// What "Open file location" shows for a Store app ("shell:AppsFolder\Family!App"): its exe inside the package folder,
+/// or the folder when the app has none (a web or system app).
+pub unsafe fn store_app_file(aumid: &str) -> Option<PathBuf> {
+    let (family, app) = aumid.split_once('!')?;
+    let dir = package_dir(family)?;
+    let xml = std::fs::read_to_string(dir.join("AppxManifest.xml")).unwrap_or_default();
+    Some(manifest_exe(&xml, app).map(|e| dir.join(e.replace('/', "\\"))).filter(|f| f.is_file()).unwrap_or(dir))
+}
+
+/// A pin of a Store (MSIX) app points into its versioned package folder, which is gone after every app update
+/// ("Windows cannot find ...\Claude_5.11492.5.0_x64__...\claude.exe"). Re-points the .lnk to the installed version.
+/// Returns the new target (lower-case), None if the target exists or is not in a package.
+unsafe fn fix_msix_pin(lnk: &[u16], target: &str) -> Option<String> {
+    if target.is_empty() || std::path::Path::new(target).exists() {
+        return None;
+    }
+    let (family, rest) = msix_family(target)?;
+    let new = package_dir(&family)?.join(&rest);
     if !new.exists() {
         return None;
     }
@@ -3076,6 +3099,27 @@ mod tests {
         let f = super::msix_family(r"C:\Program Files\WindowsApps\Claude_5.11492.5.0_x64__pzs8sxrjxfjjc\app\claude.exe");
         assert_eq!(f, Some(("claude_pzs8sxrjxfjjc".into(), r"app\claude.exe".into())));
         assert_eq!(super::msix_family(r"C:\Program Files\Steam\steam.exe"), None);
+    }
+
+    #[test]
+    fn manifest_exe_of_the_right_app() {
+        let xml = r#"<Applications>
+  <Application Id="Helper" Executable="bin/helper.exe" EntryPoint="Windows.FullTrustApplication">
+  <Application Id="App" Executable="TranslucentTB.exe" EntryPoint="Windows.FullTrustApplication"><uap:VisualElements/></Application>
+  <Application Id="Web" StartPage="https://example.com"/>"#;
+        assert_eq!(super::manifest_exe(xml, "App").as_deref(), Some("TranslucentTB.exe"));
+        assert_eq!(super::manifest_exe(xml, "Helper").as_deref(), Some("bin/helper.exe"));
+        assert_eq!(super::manifest_exe(xml, "Web"), None);
+        assert_eq!(super::manifest_exe(xml, "Nope"), None);
+    }
+
+    #[test]
+    fn store_app_location_is_in_its_package() {
+        // real system check: skipped where Calculator is not installed (CI)
+        let Some(f) = (unsafe { super::store_app_file("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App") }) else { return };
+        let s = f.to_string_lossy().to_lowercase();
+        assert!(s.contains(r"\windowsapps\microsoft.windowscalculator_") && s.ends_with(".exe"), "{s}");
+        assert!(unsafe { super::store_app_file("No.Such.App_0000000000000!App") }.is_none());
     }
 
     #[test]

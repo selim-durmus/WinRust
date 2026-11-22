@@ -1050,9 +1050,10 @@ unsafe fn app_menu(hw: HWND, i: usize, x: i32, y: i32) {
     let Some(lnk) = filtered().get(i).and_then(|&ai| APPS.lock().unwrap().get(ai).map(|a| a.1.clone())) else { return };
     let m = CreatePopupMenu();
     let path = wstr(&lnk);
-    let file = !path.starts_with("shell:"); // Store apps have no file to run elevated or to show in a folder
+    let file = !path.starts_with("shell:"); // Store apps have no file to run elevated; their location is the package folder
+    let store = path.strip_prefix(r"shell:AppsFolder\").and_then(|aumid| store_app_file(aumid));
     for (id, label) in [(1, "Open"), (2, "Run as administrator"), (3, "Open file location"), (4, if start_pinned(&path) { "Remove from Start" } else { "Add to Start" })] {
-        if file || id == 1 || id == 4 {
+        if file || id == 1 || id == 4 || (id == 3 && store.is_some()) {
             AppendMenuW(m, MF_STRING, id, wide(label).as_ptr());
         }
     }
@@ -1066,8 +1067,13 @@ unsafe fn app_menu(hw: HWND, i: usize, x: i32, y: i32) {
             ShellExecuteW(null_mut(), wide("runas").as_ptr(), lnk.as_ptr(), null(), null(), SW_SHOWNORMAL);
         }
         3 => {
-            let p = String::from_utf16_lossy(&lnk[..lnk.len().saturating_sub(1)]);
-            ShellExecuteW(null_mut(), wide("open").as_ptr(), wide("explorer.exe").as_ptr(), wide(&format!("/select,\"{p}\"")).as_ptr(), null(), SW_SHOWNORMAL);
+            // Store app: its exe in the package folder (selected), or the folder itself when it has no exe
+            let args = match &store {
+                Some(f) if f.is_dir() => format!("\"{}\"", f.display()),
+                Some(f) => format!("/select,\"{}\"", f.display()),
+                None => format!("/select,\"{path}\""),
+            };
+            ShellExecuteW(null_mut(), wide("open").as_ptr(), wide("explorer.exe").as_ptr(), wide(&args).as_ptr(), null(), SW_SHOWNORMAL);
         }
         4 => {
             start_toggle(&path);
