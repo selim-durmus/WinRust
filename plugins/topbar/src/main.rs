@@ -1690,12 +1690,20 @@ unsafe extern "system" fn kb_hook(n: i32, w: WPARAM, l: LPARAM) -> LRESULT {
                 return 1;
             }
         }
+        let is_win = k.vkCode == VK_LWIN as u32 || k.vkCode == VK_RWIN as u32;
+        if k.flags & LLKHF_INJECTED != 0 && down0 && !is_win {
+            // another app's hook took Win+<key> (it ate the key, so we never saw it) and sent its "menu mask" key (0xE8,
+            // AutoHotkey style) so the Win release opens no Start: ours must not open either
+            WIN_ALONE.store(false, Relaxed);
+        }
         if k.flags & LLKHF_INJECTED == 0 {
-            // Win+Shift+S is our own region clipper (also under Explorer); without explorer nobody opens the screen
-            // capture either: PrtSc (when Windows is set to snip with it; otherwise it copies the screen by itself) does it here
+            // without explorer nobody opens the screen capture: Win+Shift+S is our own region clipper then, and PrtSc (when
+            // Windows is set to snip with it; otherwise it copies the screen by itself) does it too. With explorer both stay
+            // with Windows or whatever tool the user set up for them (a hook of ours would race theirs).
             let held = |vk: u16| GetAsyncKeyState(vk as i32) < 0;
             let snip_key = !EXPLORER_UP.load(Relaxed) && k.vkCode == VK_SNAPSHOT as u32;
-            let win_shift_s = k.vkCode == b'S' as u32 && down0 && (held(VK_LWIN) || held(VK_RWIN)) && held(VK_SHIFT);
+            let win_shift_s =
+                !EXPLORER_UP.load(Relaxed) && k.vkCode == b'S' as u32 && down0 && (held(VK_LWIN) || held(VK_RWIN)) && held(VK_SHIFT);
             // Win+Space switches the input language in explorer's switcher; without explorer nobody does: the bar does
             if !EXPLORER_UP.load(Relaxed) && k.vkCode == VK_SPACE as u32 && (held(VK_LWIN) || held(VK_RWIN)) {
                 if down0 {
@@ -1741,7 +1749,7 @@ unsafe extern "system" fn kb_hook(n: i32, w: WPARAM, l: LPARAM) -> LRESULT {
                     PostMessageW(bar, ALT_UP, 0, 0);
                 }
             }
-            if k.vkCode == VK_LWIN as u32 || k.vkCode == VK_RWIN as u32 {
+            if is_win {
                 if down {
                     WIN_ALONE.store(true, Relaxed);
                 } else if WIN_ALONE.swap(false, Relaxed) {
