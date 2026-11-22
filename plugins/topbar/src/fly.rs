@@ -146,6 +146,8 @@ pub fn load_apps() {
     }
     v.sort_by_key(|a| a.0.to_lowercase());
     v.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
+    // Windows Settings pages ("Display", "Installed apps"...): found by name and by their search words
+    v.extend(crate::winset::PAGES.iter().map(|&(name, link, _)| (name.to_string(), wide(link))));
     *APPS.lock().unwrap() = v;
 }
 
@@ -325,6 +327,16 @@ fn find_loose_exes(hw: HWND) {
     });
 }
 
+/// A settings page found by one of its search words ("uninstall" -> Installed apps): ranks like a word of the name (1)
+/// when a search word starts with the query, else like a match inside the name (3). None for apps and for no match.
+fn page_score(path: &[u16], q: &str) -> Option<u8> {
+    let link = wstr(path);
+    if !crate::winset::is_page(&link) {
+        return None;
+    }
+    crate::winset::keywords(&link).filter_map(|k| score(k, q)).min().map(|s| if s <= 1 { 1 } else { 3 })
+}
+
 fn filtered() -> Vec<usize> {
     let q = QUERY.with_borrow(|q| q.to_lowercase());
     let mut apps = APPS.lock().unwrap();
@@ -352,7 +364,7 @@ fn filtered() -> Vec<usize> {
         .enumerate()
         .filter_map(|(i, a)| {
             let n = a.0.to_lowercase();
-            let s = score(&n, &q).or_else(|| score(&n, &fq).map(|s| s + 4))?;
+            let s = score(&n, &q).or_else(|| page_score(&a.1, &q)).or_else(|| score(&n, &fq).map(|s| s + 4))?;
             Some((s, u32::MAX - uses(&n), i))
         })
         .collect();
@@ -1038,7 +1050,7 @@ unsafe fn set_clip_text(hw: HWND, s: &str) {
 /// Starts the i-th app of the filtered Start list and counts the launch (search ranks by it). false = no such row.
 unsafe fn launch(i: usize) -> bool {
     let Some(app) = filtered().get(i).and_then(|&ai| APPS.lock().unwrap().get(ai).cloned()) else { return false };
-    if wstr(&app.1).starts_with("shell:") {
+    if wstr(&app.1).starts_with("shell:") || crate::winset::is_page(&wstr(&app.1)) {
         bump_name(&app.0); // open() counts only .lnk files
     }
     open(&app.1);
@@ -1050,7 +1062,8 @@ unsafe fn app_menu(hw: HWND, i: usize, x: i32, y: i32) {
     let Some(lnk) = filtered().get(i).and_then(|&ai| APPS.lock().unwrap().get(ai).map(|a| a.1.clone())) else { return };
     let m = CreatePopupMenu();
     let path = wstr(&lnk);
-    let file = !path.starts_with("shell:"); // Store apps have no file to run elevated; their location is the package folder
+    // Store apps have no file to run elevated; their location is the package folder. Settings pages have neither.
+    let file = !path.starts_with("shell:") && !crate::winset::is_page(&path);
     let store = path.strip_prefix(r"shell:AppsFolder\").and_then(|aumid| store_app_file(aumid));
     for (id, label) in [(1, "Open"), (2, "Run as administrator"), (3, "Open file location"), (4, if start_pinned(&path) { "Remove from Start" } else { "Add to Start" })] {
         if file || id == 1 || id == 4 || (id == 3 && store.is_some()) {
@@ -1712,6 +1725,9 @@ unsafe fn paint(hw: HWND, k: Kind) {
                         }
                         let ic = ICONS.with_borrow_mut(|m| {
                             *m.entry(app.1.clone()).or_insert_with(|| {
+                                if crate::winset::is_page(&wstr(&app.1)) {
+                                    return item_icon(crate::winset::SETTINGS_APP, icon_px()); // a settings page: the Settings icon
+                                }
                                 let t = lnk_target(&app.1);
                                 lnk_icon(&app.1, &t)
                             })
@@ -1719,10 +1735,19 @@ unsafe fn paint(hw: HWND, k: Kind) {
                         if !ic.is_null() {
                             DrawIconEx(dc, rc.left + sc(13), (rc.top + rc.bottom - icon_px()) / 2, ic, icon_px(), icon_px(), 0, null_mut(), DI_NORMAL); // at its loaded size: no stretching
                         }
-                        let store = wstr(&app.1).starts_with("shell:");
+                        let path = wstr(&app.1);
+                        let store = path.starts_with("shell:");
                         text(dc, &app.0, RECT { left: rc.left + sc(52), top: rc.top, right: rc.right - sc(110), bottom: rc.bottom }, pal().text, DT_LEFT);
                         SelectObject(dc, f_small);
-                        let kind = if sel && !q.is_empty() { "Enter ↵" } else if store { t!("Приложение", "App") } else { "" };
+                        let kind = if sel && !q.is_empty() {
+                            "Enter ↵"
+                        } else if crate::winset::is_page(&path) {
+                            t!("Параметры", "Setting")
+                        } else if store {
+                            t!("Приложение", "App")
+                        } else {
+                            ""
+                        };
                         text(dc, kind, RECT { left: rc.right - sc(110), top: rc.top, right: rc.right - sc(14), bottom: rc.bottom }, pal().dim, DT_RIGHT);
                         SelectObject(dc, f_txt);
                     }
@@ -2008,5 +2033,17 @@ mod tests {
         assert_eq!(score("calculator", "xyz"), None);
         assert_eq!(score("calculator", ""), None);
         assert_eq!(score("v", "v"), Some(0)); // one-letter initials do not count, the prefix does
+    }
+
+    #[test]
+    fn settings_found_by_search_words() {
+        let apps = super::wide("ms-settings:appsfeatures");
+        assert_eq!(super::page_score(&apps, "add or"), Some(1));
+        assert_eq!(super::page_score(&apps, "uninst"), Some(1));
+        assert_eq!(super::page_score(&apps, "remove"), Some(1)); // a word of "add or remove programs"
+        assert_eq!(super::page_score(&apps, "emove"), Some(3));
+        assert_eq!(super::page_score(&apps, "wallpaper"), None);
+        assert_eq!(super::page_score(&super::wide("ms-settings:personalization-background"), "wallpaper"), Some(1));
+        assert_eq!(super::page_score(&super::wide(r"C:\a\Uninstall.lnk"), "uninst"), None); // only settings pages have search words
     }
 }

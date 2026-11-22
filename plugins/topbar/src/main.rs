@@ -23,6 +23,7 @@ mod clip;
 mod edit;
 mod fly;
 mod quick;
+mod winset;
 use windows::{
     Win32::{
         Media::Audio::{Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eConsole, eRender},
