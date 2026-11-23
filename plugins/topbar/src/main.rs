@@ -126,6 +126,16 @@ struct Pin {
     lnk: Vec<u16>,
     target: String, // lower-case exe path, "" if unknown
     icon: HICON,
+    // other ids its windows have (lower-case): the shortcut's AppUserModelID ("aumid:...") and ones learned when the pin
+    // started a window of another exe (Steam's window belongs to steamwebhelper.exe, "aumid:valve.steam.client")
+    ids: Vec<String>,
+}
+
+/// What a taskbar button stands for: a pin (by its .lnk path, lower-case) or one open window that is not pinned.
+#[derive(Clone, PartialEq, Debug)]
+enum BKey {
+    Pin(String),
+    Win(isize),
 }
 struct Btn {
     pin: Option<usize>,
@@ -199,9 +209,14 @@ thread_local! {
     static TF_MENU: Cell<(u64, u32, bool)> = const { Cell::new((0, 0, false)) }; // tray flyout right click: when, the icon owner's pid, its menu seen
     static FHOT: Cell<i32> = const { Cell::new(-1) };
     static HOT: Cell<i32> = const { Cell::new(NONE) };
-    static ORDER: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) }; // unpinned windows in the order their buttons were added
-    // an app button held down with the left button: (its index or -1, where in the button it was grabbed, pointer x, being dragged)
-    static BDRAG: Cell<(i32, i32, i32, bool)> = const { Cell::new((-1, 0, 0, false)) };
+    // the app buttons in their order on the bar (after Start), with the windows each had: pins and open windows mixed, as
+    // the user arranged them. EnumWindows lists by z-order, so a click would jump a button to the front without it.
+    static SLOTS: RefCell<Vec<(BKey, Vec<isize>)>> = const { RefCell::new(Vec::new()) };
+    // an app button held down with the left button: (its index or -1, where in the button it was grabbed, x pressed at,
+    // pointer x, being dragged)
+    static BDRAG: Cell<(i32, i32, i32, i32, bool)> = const { Cell::new((-1, 0, 0, 0, false)) };
+    static LAUNCH: RefCell<Option<(String, u64)>> = const { RefCell::new(None) }; // a pin just started (its .lnk, when)
+    static AUMIDS: RefCell<HashMap<usize, String>> = RefCell::new(HashMap::new()); // window -> its AppUserModelID, once known
     static HV: RefCell<HashMap<i32, (f32, u64)>> = RefCell::new(HashMap::new()); // hover fade per element: (0..1, last update ms)
     static BUSY: Cell<bool> = const { Cell::new(false) }; // a fade is still running: the painter asks for another frame
     static BAR_P: Cell<f32> = const { Cell::new(0.0) }; // bar slide: 0 = off screen, 1 = in place
@@ -1182,8 +1197,81 @@ unsafe fn load_pins() {
         let target = lnk_target(&lnk);
         let target = fix_msix_pin(&lnk, &target).unwrap_or(target);
         let icon = lnk_icon(&lnk, &target);
-        PINS.with_borrow_mut(|p| p.push(Pin { lnk, target, icon }));
+        let ids = pin_ids(&lnk);
+        PINS.with_borrow_mut(|p| p.push(Pin { lnk, target, icon, ids }));
     }
+}
+
+/// AppUserModelID: the id Windows groups taskbar buttons by (System.AppUserModel.ID).
+const AUMID_KEY: windows::Win32::Foundation::PROPERTYKEY =
+    windows::Win32::Foundation::PROPERTYKEY { fmtid: windows::core::GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3), pid: 5 };
+
+unsafe fn aumid_of(ps: &windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore) -> Option<String> {
+    use windows::Win32::System::Com::{CoTaskMemFree, StructuredStorage::PropVariantToStringAlloc};
+    let v = ps.GetValue(&AUMID_KEY).ok()?;
+    let s = PropVariantToStringAlloc(&v).ok()?;
+    let r = s.to_string().ok();
+    CoTaskMemFree(Some(s.0 as *const _));
+    r.map(|r| r.to_lowercase()).filter(|r| !r.is_empty())
+}
+
+/// The AppUserModelID a window was given (Steam's: "valve.steam.client"), "" if none. Remembered once known.
+unsafe fn win_aumid(w: HWND) -> String {
+    if let Some(a) = AUMIDS.with_borrow(|m| m.get(&(w as usize)).cloned()) {
+        return a;
+    }
+    use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
+    let a = SHGetPropertyStoreForWindow::<IPropertyStore>(windows::Win32::Foundation::HWND(w as _)).ok().and_then(|ps| aumid_of(&ps)).unwrap_or_default();
+    if !a.is_empty() {
+        AUMIDS.with_borrow_mut(|m| {
+            if m.len() > 512 {
+                m.clear(); // closed windows never leave on their own
+            }
+            m.insert(w as usize, a.clone());
+        });
+    }
+    a
+}
+
+fn pin_ids_file() -> PathBuf {
+    appdata_file("topbar-pin-ids.txt")
+}
+
+/// The ids a pin's windows go by besides its target exe: the shortcut's own AppUserModelID and the ones learned for it
+/// (topbar-pin-ids.txt: "<pin file name>\t<id>" per line).
+unsafe fn pin_ids(lnk: &[u16]) -> Vec<String> {
+    let name = std::path::Path::new(&wstr_of(lnk)).file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+    let mut ids: Vec<String> = std::fs::read_to_string(pin_ids_file())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        .filter(|(f, _)| f.trim().to_lowercase() == name)
+        .map(|(_, id)| id.trim().to_lowercase())
+        .collect();
+    let own = (|| -> Option<String> {
+        let sl: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        sl.cast::<IPersistFile>().ok()?.Load(PCWSTR(lnk.as_ptr()), STGM(0)).ok()?;
+        aumid_of(&sl.cast().ok()?)
+    })();
+    ids.extend(own.map(|a| format!("aumid:{a}")));
+    ids
+}
+
+/// Which pin a window belongs to: the pin of its exe first, then one that knows its AppUserModelID or its exe as an id.
+fn pin_for(pins: &[(&str, &[String])], exe: &str, aumid: &str) -> Option<usize> {
+    let aid = format!("aumid:{aumid}");
+    pins.iter()
+        .position(|(t, _)| !t.is_empty() && *t == exe)
+        .or_else(|| pins.iter().position(|(_, ids)| (!aumid.is_empty() && ids.contains(&aid)) || (!exe.is_empty() && ids.iter().any(|i| i == exe))))
+}
+
+/// A window a just-started pin may have opened under another exe: one from the pin's own install folder (Steam's
+/// steamwebhelper.exe under Steam\, Discord.exe next to its Update.exe).
+fn same_install(target: &str, exe: &str) -> bool {
+    let Some(dir) = std::path::Path::new(target).parent().map(|d| d.to_string_lossy().to_lowercase()) else { return false };
+    let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()).to_lowercase();
+    // a pin in a shared folder (System32, the WindowsApps aliases) does not make everything there its own
+    dir.len() > 3 && !dir.starts_with(&windir) && !dir.ends_with(r"\microsoft\windowsapps") && exe.starts_with(&format!(r"{dir}\"))
 }
 
 fn pin_order_file() -> PathBuf {
@@ -1200,9 +1288,15 @@ fn pin_rank(saved: &[String], file: &str) -> usize {
     saved.iter().position(|s| s.eq_ignore_ascii_case(file)).unwrap_or(usize::MAX)
 }
 
+/// Saves where the pins sit on the bar now (open windows between them are not kept: they go when they close).
 fn save_pin_order() {
-    let names: Vec<String> = PINS.with_borrow(|p| {
-        p.iter().filter_map(|p| std::path::Path::new(&wstr_of(&p.lnk)).file_name().map(|n| n.to_string_lossy().to_string())).collect()
+    let names: Vec<String> = SLOTS.with_borrow(|s| {
+        s.iter()
+            .filter_map(|(k, _)| match k {
+                BKey::Pin(l) => std::path::Path::new(l).file_name().map(|n| n.to_string_lossy().to_string()),
+                BKey::Win(_) => None,
+            })
+            .collect()
     });
     let _ = std::fs::write(pin_order_file(), names.join("\n"));
 }
@@ -1215,51 +1309,110 @@ fn move_item<T>(v: &mut Vec<T>, from: usize, to: usize) {
     }
 }
 
-/// The range of button indices the button at `i` may be dragged within: pins among pins, open windows among open
-/// windows (Start, index 0, stays first). `pins` = how many pins there are, `n` = all buttons including Start.
-fn drag_range(i: usize, pins: usize, n: usize) -> std::ops::RangeInclusive<usize> {
-    if i <= pins { 1..=pins } else { pins + 1..=n.saturating_sub(1) }
-}
-
-/// The dragged button at index `from` goes to the slot under the pointer: moves the pin (or the open window) there.
-/// Returns the button's new index.
+/// The dragged button at index `from` goes to the slot under the pointer (any app button: pins and open windows mix;
+/// Start, index 0, stays first). Returns the button's new index.
 fn drag_to(from: usize, slot: i32) -> usize {
-    let (pins, n) = (PINS.with_borrow(|p| p.len()), BTNS.with_borrow(|b| b.len()));
-    let r = drag_range(from, pins, n);
-    let to = (slot.max(0) as usize).clamp(*r.start(), *r.end());
-    if to == from || from == 0 {
+    let n = SLOTS.with_borrow(|s| s.len());
+    if from == 0 || n == 0 {
         return from;
     }
-    if from <= pins {
-        PINS.with_borrow_mut(|p| move_item(p, from - 1, to - 1));
-    } else {
-        ORDER.with_borrow_mut(|o| move_item(o, from - 1 - pins, to - 1 - pins));
+    let to = (slot.max(1) as usize).min(n);
+    if to != from {
+        SLOTS.with_borrow_mut(|s| move_item(s, from - 1, to - 1));
+        refresh_buttons();
     }
-    refresh_buttons();
     to
 }
 
-fn refresh_buttons() {
-    let mut wins: Vec<HWND> = Vec::new();
-    unsafe { EnumWindows(Some(collect), &mut wins as *mut _ as LPARAM) };
-    let mut btns = vec![Btn { pin: None, wins: vec![], icon: null_mut() }];
-    PINS.with_borrow(|pins| btns.extend((0..pins.len()).map(|i| Btn { pin: Some(i), wins: vec![], icon: null_mut() })));
-    let mut loose: Vec<HWND> = Vec::new();
-    for w in wins {
-        let exe = unsafe { exe_of(w) };
-        let pin = PINS.with_borrow(|p| p.iter().position(|p| !p.target.is_empty() && p.target == exe));
-        match pin {
-            Some(i) => btns[1 + i].wins.push(w),
-            None => loose.push(w),
+/// The new button order: every button stays where it was; a button that is new takes the place of one that is gone and
+/// held its windows (an open app just pinned, or the windows of an app just unpinned); other new ones go at the end.
+/// Returns indices into `new`.
+fn merge_slots<K: PartialEq>(old: &[(K, Vec<isize>)], new: &[(K, Vec<isize>)]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(new.len());
+    let mut placed = vec![false; new.len()];
+    for (k, ow) in old {
+        if let Some(j) = new.iter().position(|(nk, _)| nk == k) {
+            if !placed[j] {
+                placed[j] = true;
+                out.push(j);
+            }
+            continue;
+        }
+        for (j, (nk, nw)) in new.iter().enumerate() {
+            if !placed[j] && !old.iter().any(|(o, _)| o == nk) && nw.iter().any(|w| ow.contains(w)) {
+                placed[j] = true;
+                out.push(j);
+            }
         }
     }
-    // EnumWindows lists by z-order, so clicking a window would jump its button to the front: keep the order they first appeared in
-    ORDER.with_borrow_mut(|o| {
-        o.retain(|w| loose.contains(w));
-        o.extend(loose.iter().filter(|w| !o.contains(w)).copied().collect::<Vec<_>>());
-        btns.extend(o.iter().map(|&w| Btn { pin: None, wins: vec![w], icon: unsafe { win_icon(w) } }));
-    });
-    BTNS.set(btns);
+    out.extend((0..new.len()).filter(|&j| !placed[j]));
+    out
+}
+
+fn refresh_buttons() {
+    unsafe {
+        let mut wins: Vec<HWND> = Vec::new();
+        EnumWindows(Some(collect), &mut wins as *mut _ as LPARAM);
+        let info: Vec<(HWND, String, String)> = wins.into_iter().map(|w| (w, exe_of(w), win_aumid(w))).collect();
+        let old = SLOTS.take();
+        let assign = || -> (Vec<Vec<HWND>>, Vec<HWND>) {
+            PINS.with_borrow(|pins| {
+                let keys: Vec<(&str, &[String])> = pins.iter().map(|p| (p.target.as_str(), p.ids.as_slice())).collect();
+                let (mut by_pin, mut loose) = (vec![vec![]; pins.len()], vec![]);
+                for (w, exe, aumid) in &info {
+                    match pin_for(&keys, exe, aumid) {
+                        Some(i) => by_pin[i].push(*w),
+                        None => loose.push(*w),
+                    }
+                }
+                (by_pin, loose)
+            })
+        };
+        let (mut by_pin, mut loose) = assign();
+        if learn_launched(&by_pin, &loose, &info, &old) {
+            (by_pin, loose) = assign();
+        }
+        let lnk_key = |i: usize| PINS.with_borrow(|p| BKey::Pin(wstr_of(&p[i].lnk).to_lowercase()));
+        let mut new: Vec<(BKey, Vec<isize>)> = by_pin.iter().enumerate().map(|(i, ws)| (lnk_key(i), ws.iter().map(|&w| w as isize).collect())).collect();
+        new.extend(loose.iter().map(|&w| (BKey::Win(w as isize), vec![w as isize])));
+        let order = merge_slots(&old, &new);
+        let mut btns = vec![Btn { pin: None, wins: vec![], icon: null_mut() }];
+        for &j in &order {
+            btns.push(match &new[j].0 {
+                BKey::Pin(_) => Btn { pin: Some(j), wins: by_pin[j].clone(), icon: null_mut() }, // pins come first in `new`
+                BKey::Win(w) => Btn { pin: None, wins: vec![*w as HWND], icon: win_icon(*w as HWND) },
+            });
+        }
+        SLOTS.set(order.into_iter().map(|j| new[j].clone()).collect());
+        BTNS.set(btns);
+    }
+}
+
+/// A pin was just started and no window matched it yet: the first new window from its install folder is its own (a
+/// launcher's real window, like Steam's). Its AppUserModelID (or exe) is kept as one of the pin's ids. true = learned.
+unsafe fn learn_launched(by_pin: &[Vec<HWND>], loose: &[HWND], info: &[(HWND, String, String)], old: &[(BKey, Vec<isize>)]) -> bool {
+    let Some((lnk, t0)) = LAUNCH.with_borrow(|l| l.clone()) else { return false };
+    let Some(i) = PINS.with_borrow(|p| p.iter().position(|p| wstr_of(&p.lnk).to_lowercase() == lnk)) else {
+        LAUNCH.set(None);
+        return false;
+    };
+    if now_ms().saturating_sub(t0) > 30_000 || !by_pin[i].is_empty() {
+        LAUNCH.set(None); // it came up as itself, or nothing did in time
+        return false;
+    }
+    let target = PINS.with_borrow(|p| p[i].target.clone());
+    let fresh = |w: &HWND| !old.iter().any(|(k, _)| *k == BKey::Win(*w as isize));
+    let Some((_, exe, aumid)) = info.iter().find(|(w, exe, _)| loose.contains(w) && fresh(w) && same_install(&target, exe)) else { return false };
+    let id = if aumid.is_empty() { exe.clone() } else { format!("aumid:{aumid}") };
+    let file = std::path::Path::new(&lnk).file_name().unwrap_or_default().to_string_lossy().to_string();
+    let mut all = std::fs::read_to_string(pin_ids_file()).unwrap_or_default();
+    if !all.is_empty() && !all.ends_with('\n') {
+        all.push('\n');
+    }
+    let _ = std::fs::write(pin_ids_file(), format!("{all}{file}\t{id}\n"));
+    PINS.with_borrow_mut(|p| p[i].ids.push(id));
+    LAUNCH.set(None);
+    true
 }
 
 unsafe fn endpoint() -> Option<IAudioEndpointVolume> {
@@ -2265,19 +2418,13 @@ unsafe fn draw_bar(dc: HDC, cr: RECT, quality: u32) {
     // Start, pinned apps, open windows (center)
     BTNS.with_borrow(|btns| {
         // a button being dragged is drawn last (on top), where the pointer holds it, kept within the row
-        let (di, grab, px, moving) = BDRAG.get();
+        let (di, grab, _, px, moving) = BDRAG.get();
         let dragged = if moving && di >= 1 && (di as usize) < btns.len() { Some(di as usize) } else { None };
         let order = (0..btns.len()).filter(|&i| Some(i) != dragged).chain(dragged);
+        let at = |s: usize| l.x0 + (s as i32 + 1) * (l.bw + l.gap);
         for (i, b) in order.map(|i| (i, &btns[i])) {
-            let slot_x = l.x0 + (i as i32 + 1) * (l.bw + l.gap);
-            let x = match dragged {
-                Some(d) if d == i => {
-                    let r = drag_range(d, PINS.with_borrow(|p| p.len()), btns.len());
-                    let at = |s: usize| l.x0 + (s as i32 + 1) * (l.bw + l.gap);
-                    (px - grab).clamp(at(*r.start()), at(*r.end()).max(at(*r.start())))
-                }
-                _ => slot_x,
-            };
+            // the dragged one follows the pointer, between the first app slot and the last
+            let x = if dragged == Some(i) { (px - grab).clamp(at(1), at(btns.len() - 1).max(at(1))) } else { at(i) };
             let r = RECT { left: x, top: 0, right: x + l.bw, bottom: h };
             let act = b.wins.contains(&fg);
             let (th, ta, tp) = (hv(i as i32, hot == i as i32), hv(2000 + i as i32, act), press_t(i as i32));
@@ -2617,7 +2764,7 @@ unsafe fn pin_exe(path: &str) {
     })();
     if ok.is_some() {
         let icon = lnk_icon(&lnk, exe);
-        PINS.with_borrow_mut(|p| p.push(Pin { lnk, target: exe.to_string(), icon }));
+        PINS.with_borrow_mut(|p| p.push(Pin { lnk, target: exe.to_string(), icon, ids: vec![] }));
     }
 }
 
@@ -2680,7 +2827,7 @@ pub unsafe fn pin_from_start(path: &str, name: &str) {
         let lnk = wide(&f.to_string_lossy());
         let target = lnk_target(&lnk);
         let icon = lnk_icon(&lnk, &target);
-        PINS.with_borrow_mut(|p| p.push(Pin { lnk, target, icon }));
+        PINS.with_borrow_mut(|p| p.push(Pin { ids: pin_ids(&lnk), lnk, target, icon }));
     }
     refresh_buttons();
     InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0);
@@ -2870,6 +3017,7 @@ unsafe fn click(h: i32, left: bool, mid: bool) {
                 // not running: launch the pinned app (a Store app may have updated since the pins were loaded)
                 (None, true) => lnk.iter().for_each(|l| {
                     PINS.with_borrow_mut(|p| p.iter_mut().filter(|x| x.lnk == *l).for_each(|x| x.target = fix_msix_pin(l, &x.target).unwrap_or(std::mem::take(&mut x.target))));
+                    LAUNCH.set(Some((wstr_of(l).to_lowercase(), now_ms()))); // its window may come from another exe: learn it
                     open(l)
                 }),
                 (Some(&w), false) => close_window(w), // right / middle click
@@ -3029,8 +3177,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_MOUSEMOVE if BDRAG.get().0 >= 1 => {
             let x = (lp & 0xffff) as i16 as i32;
-            let (i, grab, x0, mut moving) = BDRAG.get();
-            if !moving && (x - x0).abs() > GetSystemMetrics(SM_CXDRAG).max(sc(4)) {
+            // measured from where the button was pressed (not from the last move: slow moves never added up then)
+            let (i, grab, down_x, _, mut moving) = BDRAG.get();
+            if !moving && (x - down_x).abs() > GetSystemMetrics(SM_CXDRAG).max(2) {
                 moving = true; // past the drag distance: picked up, not clicked
                 hide_tip(hwnd);
                 KillTimer(hwnd, 2);
@@ -3043,14 +3192,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 i = drag_to(i as usize, (centre - l.x0) / (l.bw + l.gap) - 1) as i32;
                 HOT.set(i);
             }
-            BDRAG.set((i, grab, x, moving));
+            BDRAG.set((i, grab, down_x, x, moving));
             InvalidateRect(hwnd, null(), 0);
         }
         WM_LBUTTONUP if BDRAG.get().0 >= 1 => {
-            let (i, _, _, moving) = BDRAG.replace((-1, 0, 0, false));
+            let (i, _, _, _, moving) = BDRAG.replace((-1, 0, 0, 0, false));
             ReleaseCapture();
             if moving {
-                save_pin_order(); // also when an open window moved: cheap, and the pins' order is kept as it is now
+                save_pin_order(); // the pins' places; open windows keep theirs until they close
             } else {
                 click(i, true, false);
             }
@@ -3058,7 +3207,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_CAPTURECHANGED if BDRAG.get().0 >= 1 => {
             // capture taken away (a menu, Alt+Tab): no click; a move made so far stays
-            let (_, _, _, moving) = BDRAG.replace((-1, 0, 0, false));
+            let (_, _, _, _, moving) = BDRAG.replace((-1, 0, 0, 0, false));
             if moving {
                 save_pin_order();
             }
@@ -3101,7 +3250,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if h >= 1 && msg == WM_LBUTTONDOWN {
                 // an app button acts on release, as on Windows: held and moved, it is dragged to another place in the row
                 let l = bar_layout(hwnd);
-                BDRAG.set((h, x - (l.x0 + (h + 1) * (l.bw + l.gap)), x, false));
+                BDRAG.set((h, x - (l.x0 + (h + 1) * (l.bw + l.gap)), x, x, false));
                 SetCapture(hwnd);
             } else if h == NONE && msg == WM_RBUTTONDOWN {
                 fly::context_menu(x); // right click on an empty spot
@@ -3344,10 +3493,52 @@ mod tests {
         assert_eq!(v, ['d', 'b', 'c', 'a']);
         super::move_item(&mut v, 1, 9); // out of range: nothing
         assert_eq!(v, ['d', 'b', 'c', 'a']);
-        // Start (0), 3 pins (1..=3), 2 open windows (4..=5)
-        assert_eq!(super::drag_range(2, 3, 6), 1..=3);
-        assert_eq!(super::drag_range(5, 3, 6), 4..=5);
-        assert_eq!(super::drag_range(1, 0, 3), 1..=2); // no pins: open windows among themselves
+    }
+
+    #[test]
+    fn buttons_keep_their_places() {
+        use super::merge_slots;
+        let s = |k: &'static str, w: &[isize]| (k, w.to_vec());
+        // the user put the open window W1 between the pins A and B
+        let old = [s("A", &[]), s("W1", &[1]), s("B", &[2])];
+        // the same buttons come back in another order (pins first, windows after): the places stay
+        assert_eq!(merge_slots(&old, &[s("A", &[]), s("B", &[2]), s("W1", &[1])]), [0, 2, 1]);
+        // pinned A starts: it gets a window, stays put; a new window goes last
+        assert_eq!(merge_slots(&old, &[s("A", &[5]), s("B", &[2]), s("W1", &[1]), s("W9", &[9])]), [0, 2, 1, 3]);
+        // W1 closes: its button goes, the pins keep their order
+        assert_eq!(merge_slots(&old, &[s("A", &[]), s("B", &[2])]), [0, 1]);
+        // W1's app is pinned (new pin C holds window 1): C takes W1's place
+        assert_eq!(merge_slots(&old, &[s("A", &[]), s("B", &[2]), s("C", &[1])]), [0, 2, 1]);
+        // B is unpinned while running: its window W2 takes B's place
+        assert_eq!(merge_slots(&old, &[s("A", &[]), s("W1", &[1]), s("W2", &[2])]), [0, 1, 2]);
+        // first run: the order as given
+        assert_eq!(merge_slots(&[], &[s("A", &[]), s("W1", &[1])]), [0, 1]);
+    }
+
+    #[test]
+    fn windows_find_their_pin() {
+        use super::pin_for;
+        let steam_ids = vec!["aumid:valve.steam.client".to_string()];
+        let none: Vec<String> = vec![];
+        let pins: Vec<(&str, &[String])> = vec![
+            (r"c:\program files\mozilla firefox\firefox.exe", &none),
+            (r"c:\program files (x86)\steam\steam.exe", &steam_ids),
+        ];
+        assert_eq!(pin_for(&pins, r"c:\program files\mozilla firefox\firefox.exe", ""), Some(0));
+        // Steam's window belongs to steamwebhelper.exe: found by its AppUserModelID
+        assert_eq!(pin_for(&pins, r"c:\program files (x86)\steam\bin\cef\cef.win64\steamwebhelper.exe", "valve.steam.client"), Some(1));
+        assert_eq!(pin_for(&pins, r"c:\games\other.exe", ""), None);
+        assert_eq!(pin_for(&pins, r"c:\games\other.exe", "some.other.app"), None);
+    }
+
+    #[test]
+    fn launcher_windows_from_the_same_install() {
+        use super::same_install;
+        assert!(same_install(r"c:\program files (x86)\steam\steam.exe", r"c:\program files (x86)\steam\bin\cef\cef.win64\steamwebhelper.exe"));
+        assert!(same_install(r"c:\users\a\appdata\local\discord\update.exe", r"c:\users\a\appdata\local\discord\app-1.0.9\discord.exe"));
+        assert!(!same_install(r"c:\program files (x86)\steam\steam.exe", r"c:\program files\other\x.exe"));
+        assert!(!same_install(r"c:\program files (x86)\steam\steam.exe", r"c:\program files (x86)\steamx\x.exe")); // not a prefix match on names
+        assert!(!same_install(r"c:\windows\system32\cmd.exe", r"c:\windows\system32\conhost.exe")); // shared system folder
     }
 
     #[test]
