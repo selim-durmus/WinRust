@@ -374,6 +374,23 @@ fn fly_icon_px(native: i32) -> i32 {
     if (sc(16)..=sc(24)).contains(&native) { native } else if native > sc(24) { sc(20) } else { sc(16) }
 }
 
+thread_local! {
+    // the last left click on a tray icon: (its window, its id, when, where): a second one on it soon after is a double click
+    static TCLICK: Cell<(usize, u32, u64, POINT)> = const { Cell::new((0, 0, 0, POINT { x: 0, y: 0 })) };
+}
+
+/// The callback messages explorer posts for a click on a tray icon, in its order. Every app gets the plain mouse
+/// messages; NOTIFYICON_VERSION_4 apps also get NIN_SELECT after a left click and WM_CONTEXTMENU after a right one.
+/// Many v4 apps (Steam, WPF ones like FanControl) only act on WM_LBUTTONUP or WM_LBUTTONDBLCLK, others (1Password)
+/// only on NIN_SELECT.
+fn tray_events(left: bool, double: bool, v4: bool) -> Vec<u32> {
+    match (left, double) {
+        (true, true) => vec![WM_LBUTTONDBLCLK, WM_LBUTTONUP],
+        (true, false) => [WM_LBUTTONDOWN, WM_LBUTTONUP].into_iter().chain(v4.then_some(0x400)).collect(), // NIN_SELECT
+        (false, _) => [WM_RBUTTONDOWN, WM_RBUTTONUP].into_iter().chain(v4.then_some(WM_CONTEXTMENU)).collect(),
+    }
+}
+
 /// Posts the same messages explorer would for a click on the icon; the app shows its own window or menu.
 unsafe fn tray_click(t: (HWND, u32, u32, u32), left: bool) {
     let (hwnd, uid, cb, ver) = t;
@@ -385,18 +402,22 @@ unsafe fn tray_click(t: (HWND, u32, u32, u32), left: bool) {
     AllowSetForegroundWindow(pid); // so the app can bring its popup menu to the front
     let mut pt: POINT = zeroed();
     GetCursorPos(&mut pt);
-    let post = |ev: u32| {
+    let double = left && {
+        let (w, id, at, p) = TCLICK.get();
+        w == hwnd as usize
+            && id == uid
+            && now_ms().saturating_sub(at) <= GetDoubleClickTime() as u64
+            && (pt.x - p.x).abs() <= GetSystemMetrics(SM_CXDOUBLECLK) / 2
+            && (pt.y - p.y).abs() <= GetSystemMetrics(SM_CYDOUBLECLK) / 2
+    };
+    // a double click ends the pair: a third click starts a new one
+    TCLICK.set(if left && !double { (hwnd as usize, uid, now_ms(), pt) } else { (0, 0, 0, pt) });
+    for ev in tray_events(left, double, ver >= 4) {
         if ver >= 4 {
             PostMessageW(hwnd, cb, ((pt.x as u32 & 0xffff) | (pt.y as u32) << 16) as usize, (ev | (uid & 0xffff) << 16) as isize);
         } else {
             PostMessageW(hwnd, cb, uid as usize, ev as isize);
         }
-    };
-    match (left, ver >= 4) {
-        (true, true) => post(0x400), // NIN_SELECT
-        (true, false) => [WM_LBUTTONDOWN, WM_LBUTTONUP].into_iter().for_each(post),
-        (false, true) => post(WM_CONTEXTMENU),
-        (false, false) => [WM_RBUTTONDOWN, WM_RBUTTONUP].into_iter().for_each(post),
     }
 }
 
@@ -3462,6 +3483,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tray_clicks_send_what_explorer_sends() {
+        use super::{WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, tray_events};
+        // v4 apps get the mouse messages too, not NIN_SELECT alone: Steam and FanControl wait for them
+        assert_eq!(tray_events(true, false, true), vec![WM_LBUTTONDOWN, WM_LBUTTONUP, 0x400]);
+        assert_eq!(tray_events(true, false, false), vec![WM_LBUTTONDOWN, WM_LBUTTONUP]);
+        assert_eq!(tray_events(true, true, true), vec![WM_LBUTTONDBLCLK, WM_LBUTTONUP]);
+        assert_eq!(tray_events(false, false, true), vec![WM_RBUTTONDOWN, WM_RBUTTONUP, WM_CONTEXTMENU]);
+        assert_eq!(tray_events(false, false, false), vec![WM_RBUTTONDOWN, WM_RBUTTONUP]);
+    }
+
     #[test]
     fn network_icon_state() {
         use super::{INET, Link, WIFI, arcs_lit, net};
