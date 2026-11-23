@@ -200,6 +200,8 @@ thread_local! {
     static FHOT: Cell<i32> = const { Cell::new(-1) };
     static HOT: Cell<i32> = const { Cell::new(NONE) };
     static ORDER: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) }; // unpinned windows in the order their buttons were added
+    // an app button held down with the left button: (its index or -1, where in the button it was grabbed, pointer x, being dragged)
+    static BDRAG: Cell<(i32, i32, i32, bool)> = const { Cell::new((-1, 0, 0, false)) };
     static HV: RefCell<HashMap<i32, (f32, u64)>> = RefCell::new(HashMap::new()); // hover fade per element: (0..1, last update ms)
     static BUSY: Cell<bool> = const { Cell::new(false) }; // a fade is still running: the painter asks for another frame
     static BAR_P: Cell<f32> = const { Cell::new(0.0) }; // bar slide: 0 = off screen, 1 = in place
@@ -1172,6 +1174,9 @@ unsafe fn load_pins() {
     let mut files: Vec<_> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("lnk"))).collect();
     files.sort();
     files.sort_by_key(|f| std::cmp::Reverse(lnk_uses(f))); // most used first (stable: ties stay alphabetical)
+    // once the user has dragged the pins into an order, that order (pins added later go after, most used first)
+    let saved = saved_pin_order();
+    files.sort_by_key(|f| pin_rank(&saved, &f.file_name().unwrap_or_default().to_string_lossy()));
     for f in files {
         let lnk = wide(&f.to_string_lossy());
         let target = lnk_target(&lnk);
@@ -1179,6 +1184,59 @@ unsafe fn load_pins() {
         let icon = lnk_icon(&lnk, &target);
         PINS.with_borrow_mut(|p| p.push(Pin { lnk, target, icon }));
     }
+}
+
+fn pin_order_file() -> PathBuf {
+    appdata_file("topbar-pin-order.txt")
+}
+
+/// The pins' file names in the order the user dragged them into (empty until the first drag).
+fn saved_pin_order() -> Vec<String> {
+    std::fs::read_to_string(pin_order_file()).unwrap_or_default().lines().map(|l| l.trim().to_lowercase()).filter(|l| !l.is_empty()).collect()
+}
+
+/// Where a pin file goes by the saved order; names not in it after all of those.
+fn pin_rank(saved: &[String], file: &str) -> usize {
+    saved.iter().position(|s| s.eq_ignore_ascii_case(file)).unwrap_or(usize::MAX)
+}
+
+fn save_pin_order() {
+    let names: Vec<String> = PINS.with_borrow(|p| {
+        p.iter().filter_map(|p| std::path::Path::new(&wstr_of(&p.lnk)).file_name().map(|n| n.to_string_lossy().to_string())).collect()
+    });
+    let _ = std::fs::write(pin_order_file(), names.join("\n"));
+}
+
+/// Moves `v[from]` to index `to`, the others shift to make room (a dragged taskbar button).
+fn move_item<T>(v: &mut Vec<T>, from: usize, to: usize) {
+    if from < v.len() && to < v.len() && from != to {
+        let x = v.remove(from);
+        v.insert(to, x);
+    }
+}
+
+/// The range of button indices the button at `i` may be dragged within: pins among pins, open windows among open
+/// windows (Start, index 0, stays first). `pins` = how many pins there are, `n` = all buttons including Start.
+fn drag_range(i: usize, pins: usize, n: usize) -> std::ops::RangeInclusive<usize> {
+    if i <= pins { 1..=pins } else { pins + 1..=n.saturating_sub(1) }
+}
+
+/// The dragged button at index `from` goes to the slot under the pointer: moves the pin (or the open window) there.
+/// Returns the button's new index.
+fn drag_to(from: usize, slot: i32) -> usize {
+    let (pins, n) = (PINS.with_borrow(|p| p.len()), BTNS.with_borrow(|b| b.len()));
+    let r = drag_range(from, pins, n);
+    let to = (slot.max(0) as usize).clamp(*r.start(), *r.end());
+    if to == from || from == 0 {
+        return from;
+    }
+    if from <= pins {
+        PINS.with_borrow_mut(|p| move_item(p, from - 1, to - 1));
+    } else {
+        ORDER.with_borrow_mut(|o| move_item(o, from - 1 - pins, to - 1 - pins));
+    }
+    refresh_buttons();
+    to
 }
 
 fn refresh_buttons() {
@@ -2206,8 +2264,20 @@ unsafe fn draw_bar(dc: HDC, cr: RECT, quality: u32) {
 
     // Start, pinned apps, open windows (center)
     BTNS.with_borrow(|btns| {
-        for (i, b) in btns.iter().enumerate() {
-            let x = l.x0 + (i as i32 + 1) * (l.bw + l.gap);
+        // a button being dragged is drawn last (on top), where the pointer holds it, kept within the row
+        let (di, grab, px, moving) = BDRAG.get();
+        let dragged = if moving && di >= 1 && (di as usize) < btns.len() { Some(di as usize) } else { None };
+        let order = (0..btns.len()).filter(|&i| Some(i) != dragged).chain(dragged);
+        for (i, b) in order.map(|i| (i, &btns[i])) {
+            let slot_x = l.x0 + (i as i32 + 1) * (l.bw + l.gap);
+            let x = match dragged {
+                Some(d) if d == i => {
+                    let r = drag_range(d, PINS.with_borrow(|p| p.len()), btns.len());
+                    let at = |s: usize| l.x0 + (s as i32 + 1) * (l.bw + l.gap);
+                    (px - grab).clamp(at(*r.start()), at(*r.end()).max(at(*r.start())))
+                }
+                _ => slot_x,
+            };
             let r = RECT { left: x, top: 0, right: x + l.bw, bottom: h };
             let act = b.wins.contains(&fg);
             let (th, ta, tp) = (hv(i as i32, hot == i as i32), hv(2000 + i as i32, act), press_t(i as i32));
@@ -2957,6 +3027,43 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 SIG.set((s, quiet + 1));
             }
         }
+        WM_MOUSEMOVE if BDRAG.get().0 >= 1 => {
+            let x = (lp & 0xffff) as i16 as i32;
+            let (i, grab, x0, mut moving) = BDRAG.get();
+            if !moving && (x - x0).abs() > GetSystemMetrics(SM_CXDRAG).max(sc(4)) {
+                moving = true; // past the drag distance: picked up, not clicked
+                hide_tip(hwnd);
+                KillTimer(hwnd, 2);
+            }
+            let mut i = i;
+            if moving {
+                // the slot under the button's centre: the others make room there, the dragged one follows the pointer
+                let l = bar_layout(hwnd);
+                let centre = x - grab + l.bw / 2;
+                i = drag_to(i as usize, (centre - l.x0) / (l.bw + l.gap) - 1) as i32;
+                HOT.set(i);
+            }
+            BDRAG.set((i, grab, x, moving));
+            InvalidateRect(hwnd, null(), 0);
+        }
+        WM_LBUTTONUP if BDRAG.get().0 >= 1 => {
+            let (i, _, _, moving) = BDRAG.replace((-1, 0, 0, false));
+            ReleaseCapture();
+            if moving {
+                save_pin_order(); // also when an open window moved: cheap, and the pins' order is kept as it is now
+            } else {
+                click(i, true, false);
+            }
+            InvalidateRect(hwnd, null(), 0);
+        }
+        WM_CAPTURECHANGED if BDRAG.get().0 >= 1 => {
+            // capture taken away (a menu, Alt+Tab): no click; a move made so far stays
+            let (_, _, _, moving) = BDRAG.replace((-1, 0, 0, false));
+            if moving {
+                save_pin_order();
+            }
+            InvalidateRect(hwnd, null(), 0);
+        }
         WM_MOUSEMOVE => {
             let h = hit(hwnd, (lp & 0xffff) as i16 as i32);
             let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
@@ -2991,7 +3098,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if h != NONE {
                 press(h);
             }
-            if h == NONE && msg == WM_RBUTTONDOWN {
+            if h >= 1 && msg == WM_LBUTTONDOWN {
+                // an app button acts on release, as on Windows: held and moved, it is dragged to another place in the row
+                let l = bar_layout(hwnd);
+                BDRAG.set((h, x - (l.x0 + (h + 1) * (l.bw + l.gap)), x, false));
+                SetCapture(hwnd);
+            } else if h == NONE && msg == WM_RBUTTONDOWN {
                 fly::context_menu(x); // right click on an empty spot
             } else if h >= 1 && msg == WM_RBUTTONDOWN {
                 app_menu(hwnd, h);
@@ -3221,6 +3333,30 @@ mod tests {
         let s = f.to_string_lossy().to_lowercase();
         assert!(s.contains(r"\windowsapps\microsoft.windowscalculator_") && s.ends_with(".exe"), "{s}");
         assert!(unsafe { super::store_app_file("No.Such.App_0000000000000!App") }.is_none());
+    }
+
+    #[test]
+    fn drag_reorders_within_its_group() {
+        let mut v = vec!['a', 'b', 'c', 'd'];
+        super::move_item(&mut v, 0, 2);
+        assert_eq!(v, ['b', 'c', 'a', 'd']);
+        super::move_item(&mut v, 3, 0);
+        assert_eq!(v, ['d', 'b', 'c', 'a']);
+        super::move_item(&mut v, 1, 9); // out of range: nothing
+        assert_eq!(v, ['d', 'b', 'c', 'a']);
+        // Start (0), 3 pins (1..=3), 2 open windows (4..=5)
+        assert_eq!(super::drag_range(2, 3, 6), 1..=3);
+        assert_eq!(super::drag_range(5, 3, 6), 4..=5);
+        assert_eq!(super::drag_range(1, 0, 3), 1..=2); // no pins: open windows among themselves
+    }
+
+    #[test]
+    fn saved_pin_order_wins_and_new_pins_go_last() {
+        let saved = vec!["zapfast.lnk".to_string(), "firefox.lnk".to_string()];
+        let mut files = vec!["File Pilot.lnk", "Firefox.lnk", "ZapFast.lnk"]; // the usage order before
+        files.sort_by_key(|f| super::pin_rank(&saved, f));
+        assert_eq!(files, ["ZapFast.lnk", "Firefox.lnk", "File Pilot.lnk"]);
+        assert_eq!(super::pin_rank(&[], "x.lnk"), usize::MAX); // never dragged: the usage order stays
     }
 
     #[test]
