@@ -998,6 +998,11 @@ unsafe fn lnk_target(lnk: &[u16]) -> String {
         if !path.is_empty() {
             return Some(path.to_lowercase());
         }
+        // a Store app pinned the way Windows does it (an item of the Apps folder, no file): its exe in the package folder,
+        // which is what its windows run (packaged desktop apps like 1Password; UWP windows belong to their frame host)
+        if let Some(exe) = link_aumid(&sl).and_then(|a| store_app_file(&a)).filter(|f| f.is_file()) {
+            return Some(exe.to_string_lossy().to_lowercase());
+        }
         // shell links without a file target (the File Explorer pin) usually take their icon from the app's exe:
         // "%windir%\explorer.exe,0" -> match the app's windows by that exe
         let mut idx = 0;
@@ -1007,6 +1012,27 @@ unsafe fn lnk_target(lnk: &[u16]) -> String {
         icon.ends_with(".exe").then_some(icon)
     })()
     .unwrap_or_default()
+}
+
+/// The AppUserModelID a shortcut to an Apps folder item points at ("Agilebits.1Password_amwd9z03whsfe!..."), if it does.
+unsafe fn link_aumid(sl: &IShellLinkW) -> Option<String> {
+    use windows::Win32::{
+        System::Com::CoTaskMemFree,
+        UI::Shell::{SHGetNameFromIDList, SIGDN_DESKTOPABSOLUTEPARSING},
+    };
+    let pidl = sl.GetIDList().ok()?;
+    if pidl.is_null() {
+        return None;
+    }
+    let name = SHGetNameFromIDList(pidl, SIGDN_DESKTOPABSOLUTEPARSING);
+    CoTaskMemFree(Some(pidl as *const _));
+    let name = name.ok()?;
+    let s = name.to_string().unwrap_or_default();
+    CoTaskMemFree(Some(name.0 as *const _));
+    // "Family!App" (what Windows 11 gives), or "::{4234D49B-0245-4DF3-B780-3893943456E1}\Family!App" (Apps folder, then the
+    // app); a file path ("C:\...") is not an app
+    let apps_folder = s.to_uppercase().starts_with("::{4234D49B-0245-4DF3-B780-3893943456E1}\\");
+    (apps_folder || !s.contains('\\')).then(|| s.rsplit('\\').next().unwrap_or_default().to_string()).filter(|a| a.contains('!'))
 }
 
 /// The target's own icon: SHGetFileInfo on the .lnk adds the shortcut arrow, so that is only the fallback.
@@ -2525,6 +2551,80 @@ unsafe fn pin_exe(path: &str) {
     }
 }
 
+/// What a Start entry runs, the way pins are matched to windows (lower-case exe): a shortcut's target, a Store app's exe in
+/// its package, or the exe itself. "" = nothing to match (a settings page).
+unsafe fn start_target(path: &str) -> String {
+    if let Some(aumid) = path.get(..17).filter(|h| h.eq_ignore_ascii_case(r"shell:AppsFolder\")).and(path.get(17..)) {
+        return store_app_file(aumid).filter(|f| f.is_file()).map(|f| f.to_string_lossy().to_lowercase()).unwrap_or_default();
+    }
+    if path.to_lowercase().ends_with(".lnk") {
+        return lnk_target(&wide(path));
+    }
+    if path.to_lowercase().ends_with(".exe") { path.to_lowercase() } else { String::new() }
+}
+
+/// The bar pin of a Start entry (by what it runs), if there is one.
+pub unsafe fn pinned_from_start(path: &str) -> Option<usize> {
+    let t = start_target(path);
+    PINS.with_borrow(|p| p.iter().position(|p| !t.is_empty() && p.target == t))
+}
+
+/// Pins a Start entry to the bar, also when the app is not running: a shortcut keeps its arguments and icon (it is copied),
+/// a Store app gets a shortcut to its Apps folder item (as Windows pins them), a loose exe a shortcut to it.
+pub unsafe fn pin_from_start(path: &str, name: &str) {
+    if pinned_from_start(path).is_some() {
+        return;
+    }
+    let file = |name: &str| {
+        let clean: String = name.chars().map(|c| if r#"\/:*?"<>|"#.contains(c) { '_' } else { c }).collect();
+        let mut f = pin_dir().join(format!("{clean}.lnk"));
+        for n in 2.. {
+            if !f.exists() {
+                break;
+            }
+            f = pin_dir().join(format!("{clean} ({n}).lnk")); // a pin of another app with the same name stays
+        }
+        f
+    };
+    let _ = std::fs::create_dir_all(pin_dir());
+    let made = if let Some(aumid) = path.get(..17).filter(|h| h.eq_ignore_ascii_case(r"shell:AppsFolder\")).and(path.get(17..)) {
+        let f = file(name);
+        (|| -> Option<PathBuf> {
+            let mut pidl = null_mut();
+            windows::Win32::UI::Shell::SHParseDisplayName(PCWSTR(wide(&format!(r"shell:AppsFolder\{aumid}")).as_ptr()), None, &mut pidl, 0, None).ok()?;
+            let sl: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+            let ok = sl.SetIDList(pidl);
+            windows::Win32::System::Com::CoTaskMemFree(Some(pidl as *const _));
+            ok.ok()?;
+            sl.cast::<IPersistFile>().ok()?.Save(PCWSTR(wide(&f.to_string_lossy()).as_ptr()), true).ok()?;
+            Some(f)
+        })()
+    } else if path.to_lowercase().ends_with(".lnk") {
+        let f = file(name);
+        std::fs::copy(path, &f).ok().map(|_| f)
+    } else {
+        pin_exe(path); // a loose exe found by rust-search
+        None
+    };
+    if let Some(f) = made {
+        let lnk = wide(&f.to_string_lossy());
+        let target = lnk_target(&lnk);
+        let icon = lnk_icon(&lnk, &target);
+        PINS.with_borrow_mut(|p| p.push(Pin { lnk, target, icon }));
+    }
+    refresh_buttons();
+    InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0);
+}
+
+/// Removes the bar pin of a Start entry.
+pub unsafe fn unpin_from_start(path: &str) {
+    if let Some(i) = pinned_from_start(path) {
+        unpin(i);
+        refresh_buttons();
+        InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0);
+    }
+}
+
 /// Files dropped on the bar: on the Start button they are added to Start (the panel opens and the new row pulses),
 /// anywhere else they are pinned to the bar.
 unsafe fn on_drop(hwnd: HWND, hd: HDROP) {
@@ -3121,6 +3221,28 @@ mod tests {
         let s = f.to_string_lossy().to_lowercase();
         assert!(s.contains(r"\windowsapps\microsoft.windowscalculator_") && s.ends_with(".exe"), "{s}");
         assert!(unsafe { super::store_app_file("No.Such.App_0000000000000!App") }.is_none());
+    }
+
+    #[test]
+    fn store_app_pin_matches_its_exe() {
+        use super::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, IPersistFile, PCWSTR};
+        // real system check: skipped where Calculator is not installed (CI)
+        let aumid = "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App";
+        let Some(exe) = (unsafe { super::store_app_file(aumid) }) else { return };
+        let tmp = std::env::temp_dir().join("topbar-store-pin-test.lnk");
+        let _ = std::fs::remove_file(&tmp);
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let mut pidl = std::ptr::null_mut();
+            windows::Win32::UI::Shell::SHParseDisplayName(PCWSTR(super::wide(&format!(r"shell:AppsFolder\{aumid}")).as_ptr()), None, &mut pidl, 0, None).unwrap();
+            let sl: windows::Win32::UI::Shell::IShellLinkW = CoCreateInstance(&windows::Win32::UI::Shell::ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
+            sl.SetIDList(pidl).unwrap();
+            windows::core::Interface::cast::<IPersistFile>(&sl).unwrap().Save(PCWSTR(super::wide(&tmp.to_string_lossy()).as_ptr()), true).unwrap();
+            assert_eq!(super::link_aumid(&sl).as_deref(), Some(aumid));
+            assert_eq!(super::lnk_target(&super::wide(&tmp.to_string_lossy())), exe.to_string_lossy().to_lowercase());
+            assert_eq!(super::start_target(&format!(r"shell:AppsFolder\{aumid}")), exe.to_string_lossy().to_lowercase());
+        }
+        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]

@@ -1064,14 +1064,23 @@ unsafe fn launch(i: usize) -> bool {
 
 /// Right-click menu of a Start app: open, open as administrator, show the shortcut's folder.
 unsafe fn app_menu(hw: HWND, i: usize, x: i32, y: i32) {
-    let Some(lnk) = filtered().get(i).and_then(|&ai| APPS.lock().unwrap().get(ai).map(|a| a.1.clone())) else { return };
+    let Some((name, lnk)) = filtered().get(i).and_then(|&ai| APPS.lock().unwrap().get(ai).cloned()) else { return };
     let m = CreatePopupMenu();
     let path = wstr(&lnk);
     // Store apps have no file to run elevated; their location is the package folder. Settings pages have neither.
-    let file = !path.starts_with("shell:") && !crate::winset::is_page(&path);
+    let page = crate::winset::is_page(&path);
+    let file = !path.starts_with("shell:") && !page;
     let store = path.strip_prefix(r"shell:AppsFolder\").and_then(|aumid| store_app_file(aumid));
-    for (id, label) in [(1, "Open"), (2, "Run as administrator"), (3, "Open file location"), (4, if start_pinned(&path) { "Remove from Start" } else { "Add to Start" })] {
-        if file || id == 1 || id == 4 || (id == 3 && store.is_some()) {
+    let on_bar = pinned_from_start(&path).is_some();
+    let items = [
+        (1, "Open"),
+        (2, "Run as administrator"),
+        (3, "Open file location"),
+        (5, if on_bar { "Unpin from taskbar" } else { "Pin to taskbar" }),
+        (4, if start_pinned(&path) { "Remove from Start" } else { "Add to Start" }),
+    ];
+    for (id, label) in items {
+        if file || id == 1 || id == 4 || (id == 3 && store.is_some()) || (id == 5 && !page) {
             AppendMenuW(m, MF_STRING, id, wide(label).as_ptr());
         }
     }
@@ -1096,6 +1105,14 @@ unsafe fn app_menu(hw: HWND, i: usize, x: i32, y: i32) {
         4 => {
             start_toggle(&path);
             return; // stay open, the list just changed
+        }
+        5 => {
+            if on_bar {
+                unpin_from_start(&path);
+            } else {
+                pin_from_start(&path, &name);
+            }
+            return; // stay open: the bar shows the change behind the panel
         }
         _ => return,
     }
