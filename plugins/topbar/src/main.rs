@@ -1243,6 +1243,7 @@ unsafe fn pin_ids(lnk: &[u16]) -> Vec<String> {
     let name = std::path::Path::new(&wstr_of(lnk)).file_name().unwrap_or_default().to_string_lossy().to_lowercase();
     let mut ids: Vec<String> = std::fs::read_to_string(pin_ids_file())
         .unwrap_or_default()
+        .trim_start_matches('\u{feff}') // a file saved by PowerShell 5 starts with a BOM
         .lines()
         .filter_map(|l| l.split_once('\t'))
         .filter(|(f, _)| f.trim().to_lowercase() == name)
@@ -1686,11 +1687,15 @@ fn layout(w: i32) -> Layout {
     let sys = (clock.0 - gap - pill, clock.0 - gap);
     let apps = (sys.0 - gap - sc(24) * tray_count() as i32, sys.0 - gap);
     let margin = (w - apps.0) + sc(8); // keep the button group centered and clear of both sides
-    let n = BTNS.with_borrow(|b| b.len()) as i32 + 1; // + the search slot
+    let search = search_shown();
+    let n = BTNS.with_borrow(|b| b.len()) as i32 + search as i32; // + the search slot, when it is shown
     // Windows 11: 44 px slots side by side, no gap (the highlight's own inset separates them); narrower when crowded
     let gap = 0;
     let bw = (((w - 2 * margin + gap) / n.max(1)) - gap).clamp(sc(16), sc(BTN_W));
-    Layout { x0: row_x0(w, n, bw, gap, margin, sc(6)), bw, gap, apps, sys, clock }
+    // x0 is the search slot's place either way: hidden, it sits just left of the row (not drawn, not clickable), so the
+    // buttons after it keep their slot arithmetic
+    let x0 = row_x0(w, n, bw, gap, margin, sc(6)) - if search { 0 } else { bw + gap };
+    Layout { x0, bw, gap, apps, sys, clock }
 }
 
 /// Left edge of the button row (search, Start, pins, open windows: `n` slots of `bw` + `gap`) on a bar `w` wide.
@@ -1724,7 +1729,7 @@ unsafe fn hit(hwnd: HWND, x: i32) -> i32 {
     }
     let n = BTNS.with_borrow(|b| b.len()) as i32 + 1;
     let (d, i) = (x - l.x0, (x - l.x0) / (l.bw + l.gap));
-    if d < 0 || d % (l.bw + l.gap) >= l.bw || i >= n { NONE } else if i == 0 { SEARCH } else { i - 1 }
+    if d < 0 || d % (l.bw + l.gap) >= l.bw || i >= n || (i == 0 && !search_shown()) { NONE } else if i == 0 { SEARCH } else { i - 1 }
 }
 
 // ---------- animation ----------
@@ -2410,10 +2415,12 @@ unsafe fn draw_bar(dc: HDC, cr: RECT, quality: u32) {
     let hl = |r: RECT| RECT { left: r.left + sc(2), top: r.top + sc(4), right: r.right - sc(2), bottom: r.bottom - sc(4) };
 
     // search button (left of Start)
-    let sb = RECT { left: l.x0, top: 0, right: l.x0 + l.bw, bottom: h };
-    glow(dc, SEARCH, hot == SEARCH, hl(sb), pal().bg, pal().hover, sc(8));
     SelectObject(dc, f_glyph);
-    text(dc, "\u{E721}", sb, if hot == SEARCH { pal().text } else { mix(pal().dim, pal().text, 0.5) }, DT_CENTER);
+    if search_shown() {
+        let sb = RECT { left: l.x0, top: 0, right: l.x0 + l.bw, bottom: h };
+        glow(dc, SEARCH, hot == SEARCH, hl(sb), pal().bg, pal().hover, sc(8));
+        text(dc, "\u{E721}", sb, if hot == SEARCH { pal().text } else { mix(pal().dim, pal().text, 0.5) }, DT_CENTER);
+    }
 
     // Start, pinned apps, open windows (center)
     BTNS.with_borrow(|btns| {
@@ -2919,14 +2926,46 @@ unsafe fn open_launcher() -> bool {
     true
 }
 
+thread_local! {
+    static SEARCH_SHOWN: Cell<Option<bool>> = const { Cell::new(None) }; // read once from topbar-no-search.txt
+}
+
+/// The search button left of Start (like Windows 11's "Search: Hide / Icon only"). Off = topbar-no-search.txt exists.
+fn search_shown() -> bool {
+    SEARCH_SHOWN.get().unwrap_or_else(|| {
+        let on = !appdata_file("topbar-no-search.txt").exists();
+        SEARCH_SHOWN.set(Some(on));
+        on
+    })
+}
+
+unsafe fn set_search_shown(on: bool) {
+    let f = appdata_file("topbar-no-search.txt");
+    let _ = if on { std::fs::remove_file(f) } else { std::fs::write(f, "the search button is hidden (right-click on the bar > Bar style… > Search button)\n") };
+    SEARCH_SHOWN.set(Some(on));
+    HOT.set(NONE);
+    InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0); // the row re-centres without it
+}
+
+/// Right-click on the search button: hide it (it comes back from Bar style…).
+unsafe fn search_menu(cx: i32) {
+    let items = vec![fly::MItem::new(t!("Скрыть кнопку поиска", "Hide the search button"))];
+    fly::menu(cx, None, items, |i| {
+        if i == 0 {
+            set_search_shown(false);
+        }
+    });
+}
+
 /// The Style menu ("Bar style…" in the empty-spot right-click menu), opened at `cx`: the UI style (saved for the other
-/// WinRust programs), auto-hide, the panel's opacity and putting the windows side by side.
+/// WinRust programs), auto-hide, the search button, the panel's opacity and putting the windows side by side.
 unsafe fn style_menu(cx: i32) {
     let bar = BAR.load(Relaxed) as HWND;
     let names = [t!("Обычный", "Normal"), t!("Терминал", "Terminal"), t!("Плавающий док", "Floating dock"), t!("Тайлинг", "Tiling"), t!("Белая дорога", "White road")];
     let mut items: Vec<fly::MItem> = i18n::style::ALL.iter().zip(names).map(|(&s, n)| fly::MItem::new(n).on(s == style())).collect();
     items.push(fly::MItem::new(t!("Разложить окна плиткой", "Tile the windows")).sep());
     items.push(fly::MItem::new(t!("Скрывать панель автоматически", "Hide the bar automatically")).on(i18n::style::autohide()));
+    items.push(fly::MItem::new(t!("Кнопка поиска", "Search button")).on(search_shown())); // right-click on it hides it too
     // the panel behind the buttons: solid, translucent or clear (the wallpaper shows through; good on OLED screens)
     let op = i18n::style::bar_opacity();
     items.push(fly::MItem::new(t!("Сплошная панель", "Solid bar")).on(op == 100).sep());
@@ -2945,9 +2984,10 @@ unsafe fn style_menu(cx: i32) {
             place(bar); // the reserved strip comes or goes with it
             bar_anim(bar);
         }
+        None if i == hide + 1 => set_search_shown(!search_shown()),
         None => {
             // a hand-set translucency (bar-opacity.txt) stays when Translucent is picked again
-            let pct = match i - hide {
+            let pct = match i - hide - 1 {
                 1 => 100,
                 2 if (1..100).contains(&op) => op,
                 2 => 50,
@@ -3252,6 +3292,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let l = bar_layout(hwnd);
                 BDRAG.set((h, x - (l.x0 + (h + 1) * (l.bw + l.gap)), x, x, false));
                 SetCapture(hwnd);
+            } else if h == SEARCH && msg == WM_RBUTTONDOWN {
+                search_menu(x);
             } else if h == NONE && msg == WM_RBUTTONDOWN {
                 fly::context_menu(x); // right click on an empty spot
             } else if h >= 1 && msg == WM_RBUTTONDOWN {
