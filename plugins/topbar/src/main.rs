@@ -502,6 +502,14 @@ unsafe fn app_menu_up(pid: u32) -> bool {
     pid != 0 && fpid == pid && IsWindowVisible(fg) != 0 && st & WS_POPUP != 0 && st & WS_CAPTION != WS_CAPTION
 }
 
+/// The icon's app brought one of its windows (not a menu) to the front: a click opened it, the flyout can go.
+unsafe fn app_window_up(pid: u32) -> bool {
+    let fg = GetForegroundWindow();
+    let mut fpid = 0u32;
+    GetWindowThreadProcessId(fg, &mut fpid);
+    pid != 0 && fpid == pid && IsWindowVisible(fg) != 0 && !app_menu_up(pid)
+}
+
 /// How far the tray flyout still is from its place at opening progress `e` (0..1): it rises toward the bar's far side.
 unsafe fn tf_slide(e: f32) -> i32 {
     let d = ((1.0 - e) * sc(14) as f32) as i32;
@@ -619,16 +627,14 @@ unsafe extern "system" fn fly_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 if msg == WM_MBUTTONDOWN {
                     toggle_shown(&key);
                     InvalidateRect(hwnd, null(), 0);
-                } else if msg == WM_RBUTTONDOWN {
-                    // the flyout stays behind the app's menu (as in Windows 11) and closes once the menu is gone
+                } else {
+                    // the flyout stays behind the app's menu (as in Windows 11) and closes once the menu is gone or the
+                    // app shows a window. Left clicks too: some apps (Steam) answer one with a menu and open on a
+                    // double click, which needs the flyout still there for the second click.
                     let mut pid = 0u32;
                     GetWindowThreadProcessId(t.0, &mut pid);
                     TF_MENU.set((now_ms(), pid, false));
-                    SetTimer(hwnd, 2, 100, None);
-                    tray_click(t, false);
-                } else {
-                    ShowWindow(hwnd, SW_HIDE);
-                    InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0); // the bar's chevron turns with it
+                    SetTimer(hwnd, 2, 50, None);
                     tray_click(t, msg == WM_LBUTTONDOWN);
                 }
             }
@@ -646,7 +652,7 @@ unsafe extern "system" fn fly_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             let (at, pid, seen) = TF_MENU.get();
             if app_menu_up(pid) {
                 TF_MENU.set((at, pid, true));
-            } else if seen || now_ms().saturating_sub(at) > TF_MENU_WAIT {
+            } else if seen || app_window_up(pid) || now_ms().saturating_sub(at) > TF_MENU_WAIT {
                 // the menu closed (an item picked, Esc, a click elsewhere) or never came: close unless the user is back on us
                 KillTimer(hwnd, 2);
                 TF_MENU.set((0, 0, false));
