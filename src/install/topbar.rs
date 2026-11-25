@@ -45,6 +45,50 @@ pub(crate) fn shells_run(script: &str) -> Result<(), String> {
     r
 }
 
+/// Windows' own "Pin to Start" right-click items (exe, lnk and folders): they pin to the Windows Start menu, which the bar
+/// replaces. Blocked while topbar is installed, so file managers (File Pilot, Explorer) show only ours.
+pub(crate) const WIN_PIN_HANDLERS: [&str; 2] = ["{470C0EBD-5D73-4d58-9CED-E91E22E23282}", "{a2a9545d-a0c2-42b4-9708-a0b2badd77c8}"];
+pub(crate) const BLOCKED_KEY: &str = r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked";
+/// Which of those we blocked ourselves (one already blocked by someone else stays blocked on uninstall).
+pub(crate) const BAR_STATE: &str = r"HKLM\SOFTWARE\plugin-launcher\topbar";
+/// File types that get our "Pin to Start": the ones Windows offers it for.
+pub(crate) const PIN_TYPES: [&str; 3] = ["exefile", "lnkfile", "Directory"];
+pub(crate) const PIN_VERB: &str = "WinRustPinToStart";
+
+fn pin_verb_key(ty: &str) -> String {
+    format!(r"HKLM\SOFTWARE\Classes\{ty}\shell\{PIN_VERB}")
+}
+
+/// "Pin to Start" in every file manager's right-click menu adds to the bar's Start panel (`topbar.exe --pin-start`).
+pub(crate) fn pin_verb_install(bar: &Path) -> Result<(), String> {
+    for h in WIN_PIN_HANDLERS {
+        if out("reg", &["query", BLOCKED_KEY, "/v", h]).is_err() {
+            run("reg", &["add", BAR_STATE, "/v", &format!("blocked{h}"), "/t", "REG_DWORD", "/d", "1", "/f"])?; // ours to unblock
+            run("reg", &["add", BLOCKED_KEY, "/v", h, "/t", "REG_SZ", "/d", "Pin to Start (Windows), replaced by WinRust topbar", "/f"])?;
+        }
+    }
+    let cmd = format!("\"{}\" --pin-start \"%1\"", bar.display());
+    for ty in PIN_TYPES {
+        let k = pin_verb_key(ty);
+        run("reg", &["add", &k, "/v", "MUIVerb", "/t", "REG_SZ", "/d", t!("Закрепить в Пуске", "Pin to Start"), "/f"])?;
+        run("reg", &["add", &k, "/v", "Icon", "/t", "REG_SZ", "/d", &format!("\"{}\",0", bar.display()), "/f"])?;
+        run("reg", &["add", &format!(r"{k}\command"), "/ve", "/t", "REG_SZ", "/d", &cmd, "/f"])?;
+    }
+    Ok(())
+}
+
+pub(crate) fn pin_verb_uninstall() {
+    for ty in PIN_TYPES {
+        let _ = run("reg", &["delete", &pin_verb_key(ty), "/f"]);
+    }
+    for h in WIN_PIN_HANDLERS {
+        if reg_dword(BAR_STATE, &format!("blocked{h}")).is_some() {
+            let _ = run("reg", &["delete", BLOCKED_KEY, "/v", h, "/f"]);
+        }
+    }
+    let _ = run("reg", &["delete", BAR_STATE, "/f"]);
+}
+
 pub(crate) fn bar_install() -> Result<(), String> {
     with_payload(&["topbar.exe", "rs-du.exe", "reshell.exe"], |d| {
         let dst = bar_dir().join("topbar.exe");
@@ -71,6 +115,7 @@ pub(crate) fn bar_install() -> Result<(), String> {
             let _ = Command::new("explorer.exe").arg(&dst).spawn(); // normal user token, like rs-launcher
         }
         soft(t!("профиль PowerShell не записан", "PowerShell profile was not written"), profile_install()); // a shell nicety, must not fail the bar install
+        soft(t!("пункт «Закрепить в Пуске» не добавлен", "\"Pin to Start\" menu item was not added"), pin_verb_install(&dst));
         Ok(())
     })
 }
@@ -82,6 +127,7 @@ pub(crate) fn bar_uninstall() -> Result<(), String> {
     let _ = run("taskkill", &["/f", "/im", "reshell.exe"]);
     let _ = run("taskkill", &["/f", "/im", "topbar.exe"]);
     let _ = profile_uninstall();
+    pin_verb_uninstall(); // Windows' own "Pin to Start" comes back
     let r = run(bar_dir().join("topbar.exe").to_str().unwrap(), &["--restore"]); // a killed bar cannot restore the taskbar itself
     let _ = fs::remove_dir_all(bar_dir());
     cleaner_release(tm_dir().join("rtaskmgr-win32.exe").is_file());

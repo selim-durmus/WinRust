@@ -281,6 +281,14 @@ pub fn note(s: &str) {
     NOTE.set(s.to_string());
 }
 
+/// Adds a path to the Start list file when no bar is running (`topbar --pin-start` from a file manager).
+pub fn pin_offline(path: &str) {
+    pinned_load();
+    if !start_pinned(path) {
+        start_toggle(path);
+    }
+}
+
 /// Adds the app to the Start panel, or removes it when it is already there.
 pub fn start_toggle(path: &str) {
     let mut p = PINNED.lock().unwrap();

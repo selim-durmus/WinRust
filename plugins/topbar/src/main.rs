@@ -2878,6 +2878,53 @@ pub unsafe fn unpin_from_start(path: &str) {
 
 /// Files dropped on the bar: on the Start button they are added to Start (the panel opens and the new row pulses),
 /// anywhere else they are pinned to the bar.
+/// Adds files to the Start panel and opens it with a note saying what happened (a drop on the Start button, or "Pin to
+/// Start" in a file manager's right-click menu).
+unsafe fn add_to_start(files: &[String]) {
+    let added: Vec<&String> = files.iter().filter(|f| fly::start_pin(f)).collect();
+    let name = |p: &str| std::path::Path::new(p).file_stem().unwrap_or_default().to_string_lossy().to_string();
+    if !fly::is_open(fly::Kind::Start) {
+        fly::toggle(fly::Kind::Start);
+    }
+    fly::note(&match added.len() {
+        0 => "Already in Start".to_string(),
+        1 => format!("Added to Start: {}", name(added[0])),
+        n => format!("Added {n} items to Start"),
+    });
+}
+
+/// WM_COPYDATA dwData of `topbar --pin-start <path>` (the "Pin to Start" verb the installer registers for files and
+/// folders): the path, UTF-16 without the terminating zero.
+const PIN_START: usize = 0x5753_5450; // "WSTP"
+
+/// `topbar --pin-start <path>`: hands the path to the running bar, which adds it to its Start panel. Without a bar it is
+/// written to the Start list file, where the bar finds it at its next start.
+unsafe fn pin_start_cli(path: &str) {
+    let path = std::path::absolute(path).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| path.to_string());
+    let bar = FindWindowW(wide("topbar").as_ptr(), null());
+    if !bar.is_null() {
+        let w: Vec<u16> = path.encode_utf16().collect();
+        let cds = Cds { dw: PIN_START, cb: (w.len() * 2) as u32, p: w.as_ptr() as *const u8 };
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(bar, &mut pid);
+        AllowSetForegroundWindow(pid); // we were just started from a click: let the bar bring its Start panel up
+        let mut r = 0usize;
+        if SendMessageTimeoutW(bar, WM_COPYDATA, 0, &cds as *const _ as isize, SMTO_ABORTIFHUNG, 3000, &mut r) != 0 && r == 1 {
+            return;
+        }
+    }
+    fly::pin_offline(&path);
+}
+
+/// The path inside a PIN_START WM_COPYDATA.
+unsafe fn pin_start_path(c: &Cds) -> Option<String> {
+    if c.dw != PIN_START || c.p.is_null() || c.cb == 0 || c.cb % 2 != 0 || c.cb > 64 * 1024 {
+        return None;
+    }
+    let w = std::slice::from_raw_parts(c.p as *const u16, c.cb as usize / 2);
+    Some(String::from_utf16_lossy(w).trim_end_matches('\0').to_string()).filter(|p| !p.is_empty())
+}
+
 unsafe fn on_drop(hwnd: HWND, hd: HDROP) {
     let mut pt: POINT = zeroed();
     DragQueryPoint(hd, &mut pt);
@@ -2894,16 +2941,7 @@ unsafe fn on_drop(hwnd: HWND, hd: HDROP) {
     let h = hit(hwnd, pt.x);
     press(if h == NONE { 0 } else { h });
     if h == 0 {
-        let added: Vec<&String> = files.iter().filter(|f| fly::start_pin(f)).collect();
-        let name = |p: &str| std::path::Path::new(p).file_stem().unwrap_or_default().to_string_lossy().to_string();
-        if !fly::is_open(fly::Kind::Start) {
-            fly::toggle(fly::Kind::Start);
-        }
-        fly::note(&match added.len() {
-            0 => "Already in Start".to_string(),
-            1 => format!("Added to Start: {}", name(added[0])),
-            n => format!("Added {n} items to Start"),
-        });
+        add_to_start(&files);
     } else {
         files.iter().for_each(|f| pin_exe(f));
         refresh_buttons();
@@ -3229,6 +3267,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             InvalidateRect(hwnd, null(), 0);
         }
         WM_DROPFILES => on_drop(hwnd, wp as HDROP),
+        WM_COPYDATA => match pin_start_path(&*(lp as *const Cds)) {
+            Some(p) => {
+                add_to_start(&[p]);
+                return 1;
+            }
+            None => return 0,
+        },
         WM_TIMER => {
             hide_taskbar_if_shown();
             refresh();
@@ -3374,6 +3419,10 @@ fn main() {
             EXPLORER_UP.store(!FindWindowW(wide("Shell_TrayWnd").as_ptr(), null()).is_null(), Relaxed);
             OPEN_WAIT.store(true, Relaxed);
             open(&wide(&t));
+            return;
+        }
+        if let Some(p) = std::env::args().skip_while(|a| a != "--pin-start").nth(1) {
+            pin_start_cli(&p);
             return;
         }
         if std::env::args().any(|a| a == "--shot") {
