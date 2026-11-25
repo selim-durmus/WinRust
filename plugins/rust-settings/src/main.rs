@@ -1,7 +1,7 @@
 #![windows_subsystem = "windows"]
 // rust-settings [page]   A small Settings window that does not need Explorer or the Store Settings app.
 // Pages: Display (resolution, refresh rate, scale, orientation, HDR, night light, arrangement of several displays by dragging), Sound (output/input
-// device, volume, mute, volume per app), Power & storage (battery, power plan, drives, disk cleanup), Network (adapters, Wi-Fi on every adapter:
+// device, volume, mute, volume per app), Power & storage (battery, power plan, drives, disk cleanup, old graphics drivers), Network (adapters, Wi-Fi on every adapter:
 // radio, connect with a password or 802.1X user name/password, hidden networks, disconnect/forget on right click; VPN; proxy), Bluetooth (radio,
 // airplane mode, paired and nearby devices), Apps (installed programs, uninstall), Windows Update (check, install), Personalization, About.
 // `page` is a name or an ms-settings: address; anything unknown opens the first page. Esc closes, Up/Down change the page.
@@ -9,7 +9,8 @@
 // Safety: only documented Win32/WinRT calls (the one undocumented piece is the default-device switch of the sound panel, see audio.rs);
 // written are the HKCU values in `pages()`, the proxy values, the display mode and layout, the audio volume/mute/default device,
 // Wi-Fi profiles through the WLAN API (a password typed here goes only into the profile Windows stores), the night-light setting;
-// started: a program's own uninstaller after a second click, and this exe again for the night-light filter. No shell, no strings run as commands.
+// started: a program's own uninstaller after a second click, this exe again for the night-light filter, and this exe elevated
+// (`--old-drivers`, see drivers.rs) to remove old graphics drivers or to turn the scheduled task that does it on/off. No shell, no strings run as commands.
 // Display: resolution, refresh rate, scale (undocumented DisplayConfig type -4, the one Windows' Settings uses), orientation, HDR.
 // Several displays: pick the display the rows act on, extend/duplicate/one screen only (confirmed like a resolution), make main.
 // shortcut: night light is a colour filter of our own (a gamma ramp kept by a helper process), not Windows' schedule-driven one (an undocumented per-build blob).
@@ -18,6 +19,7 @@ extern crate winrust_common;
 mod audio;
 mod bt;
 mod display;
+mod drivers;
 mod ext;
 mod net;
 mod power;
@@ -93,6 +95,7 @@ enum Op {
     Pac,    // asks for the proxy script address
     Bt,     // Bluetooth radio
     Air,    // airplane mode
+    DriverAuto, // the scheduled task that removes old graphics drivers
 }
 
 #[derive(Clone)]
@@ -100,6 +103,7 @@ enum Cmd {
     Vpn(ext::Vpn),
     CleanTemp,
     EmptyBin,
+    OldDrivers,
     Uninstall(String),
     BtPair(String),
     BtUnpair(String),
@@ -573,6 +577,8 @@ fn power_rows() -> Vec<Row> {
             head(t!("Очистка диска", "Disk cleanup")),
             Row::Item(t!("Временные файлы (старше суток)", "Temporary files (older than a day)").into(), ext::temp_text(), Cmd::CleanTemp),
             Row::Item(t!("Корзина", "Recycle Bin").into(), if bin == 0 { t!("пуста", "empty").into() } else { power::size(bin) }, Cmd::EmptyBin),
+            Row::Item(t!("Старые видеодрайверы", "Old graphics drivers").into(), drivers::text(), Cmd::OldDrivers),
+            Row::Switch(t!("Удалять старые видеодрайверы автоматически", "Remove old graphics drivers automatically").into(), drivers::auto_on, Op::DriverAuto),
         ],
     ]
     .into_iter()
@@ -1265,6 +1271,12 @@ unsafe fn display_or_mute(_hwnd: HWND, op: Op) {
                 bt::set_airplane(!on, ping);
             }
         }
+        Op::DriverAuto => {
+            if let Some(on) = drivers::auto_on() {
+                note(if on { t!("Выключаю автоудаление…", "Turning automatic removal off…") } else { t!("Включаю автоудаление…", "Turning automatic removal on…") }.into());
+                drivers::set_auto(!on, note);
+            }
+        }
         Op::Proxy => unsafe { open_prompt(_hwnd, Prompt::Proxy(false)) },
         Op::Pac => unsafe { open_prompt(_hwnd, Prompt::Proxy(true)) },
         _ => {}
@@ -1329,6 +1341,9 @@ unsafe fn goto(hwnd: HWND, i: usize) {
                 if ext::TEMP_BYTES.load(std::sync::atomic::Ordering::Relaxed) == u64::MAX {
                     ext::measure_temp(ping);
                 }
+                if !drivers::measured() {
+                    drivers::measure(ping);
+                }
             }
             _ => {}
         }
@@ -1358,6 +1373,18 @@ unsafe fn run_cmd(hwnd: HWND, label: &str, cmd: Cmd) {
             Cmd::BtUnpair(id) => {
                 if once_more(label) {
                     bt::unpair(id, ping);
+                }
+            }
+            Cmd::OldDrivers if !drivers::any_old() => {
+                APP.with_borrow_mut(|a| a.armed = None);
+                if drivers::measured() {
+                    say(t!("Старых видеодрайверов нет", "No old graphics drivers").into());
+                }
+            }
+            Cmd::OldDrivers => {
+                if once_more(label) {
+                    say(t!("Удаление старых драйверов…", "Removing old drivers…").into());
+                    drivers::clean_now(note);
                 }
             }
             c => {
@@ -1400,7 +1427,7 @@ unsafe fn run_cmd(hwnd: HWND, label: &str, cmd: Cmd) {
                         wu::install(ping);
                         ping();
                     }
-                    Cmd::Uninstall(_) | Cmd::BtUnpair(_) => {}
+                    Cmd::Uninstall(_) | Cmd::BtUnpair(_) | Cmd::OldDrivers => {}
                 }
             }
         }
@@ -1989,6 +2016,10 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("--nightlight") {
         return ext::night_helper(); // the colour filter's background process, see ext.rs
     }
+    if std::env::args().nth(1).as_deref() == Some("--old-drivers") {
+        // started elevated by the window, or by the scheduled task as SYSTEM: no window, see drivers.rs
+        std::process::exit(drivers::command(&std::env::args().nth(2).unwrap_or_default()) as i32);
+    }
     audio::init();
     unsafe {
         let (mut token, mut input): (usize, windows_sys::Win32::Graphics::GdiPlus::GdiplusStartupInput) = (0, std::mem::zeroed());
@@ -2001,9 +2032,13 @@ fn main() {
         APP.with_borrow_mut(|a| (a.pages, a.page, a.dpi, a.layout) = (pg, start, dpi, lay));
         refresh_fonts();
         let (inst, class) = (GetModuleHandleW(null()), wide("WinRustSettings"));
-        let wc = WNDCLASSW { style: 0, lpfnWndProc: Some(proc), cbClsExtra: 0, cbWndExtra: 0, hInstance: inst, hIcon: null_mut(), hCursor: LoadCursorW(null_mut(), IDC_ARROW), hbrBackground: null_mut(), lpszMenuName: null(), lpszClassName: class.as_ptr() };
+        // the gear of app.rc (resource 1) in the title bar and Alt+Tab, at this display's sizes (the process is DPI aware)
+        let icon = |m| LoadImageW(inst, 1 as *const u16, IMAGE_ICON, GetSystemMetrics(m), GetSystemMetrics(m), LR_DEFAULTCOLOR);
+        let (big, small) = (icon(SM_CXICON), icon(SM_CXSMICON));
+        let wc = WNDCLASSW { style: 0, lpfnWndProc: Some(proc), cbClsExtra: 0, cbWndExtra: 0, hInstance: inst, hIcon: big, hCursor: LoadCursorW(null_mut(), IDC_ARROW), hbrBackground: null_mut(), lpszMenuName: null(), lpszClassName: class.as_ptr() };
         RegisterClassW(&wc);
         let hwnd = CreateWindowExW(0, class.as_ptr(), wide(t!("Параметры", "Settings")).as_ptr(), WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 940 * dpi / 96, 620 * dpi / 96, null_mut(), null_mut(), inst, null());
+        SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, small as isize);
         frame(hwnd);
         MAIN.store(hwnd as isize, std::sync::atomic::Ordering::Relaxed);
         wifi::watch(hwnd);
