@@ -324,7 +324,7 @@ fn watch(d: u8) {
 }
 
 unsafe fn watch_drive(d: u8) {
-    use windows_sys::Win32::{Foundation::*, Storage::FileSystem::*, System::{IO::*, Threading::*}};
+    use windows_sys::Win32::{Foundation::*, Storage::FileSystem::*, System::{IO::*, Threading::*}, UI::WindowsAndMessaging::PostMessageW};
     let base = PathBuf::from(format!("{}:\\", (b'A' + d) as char));
     let root: Vec<u16> = format!("{}:\\", (b'A' + d) as char).encode_utf16().chain([0]).collect();
     let h = CreateFileW(root.as_ptr(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, std::ptr::null(), OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, std::ptr::null_mut());
@@ -354,7 +354,7 @@ unsafe fn watch_drive(d: u8) {
             // more changes than the buffer holds: this drive's totals are counted again when they are next shown
             forget(d);
             (dirty, dead) = (HashSet::new(), HashSet::new());
-            note();
+            PostMessageW(MAIN.load(Relaxed) as _, WM_SIZES, 1, 0); // the folder shown counts again
             continue;
         }
         let base_ptr = buf.as_ptr() as *const u8;

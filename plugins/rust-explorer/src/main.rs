@@ -2383,7 +2383,17 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                 }
                 0
             }
-            sizes::WM_SIZES => { InvalidateRect(ST.with_borrow(|st| st.list), ptr::null(), 0); glist::invalidate(); 0 }
+            sizes::WM_SIZES => {
+                // wp = 1: a drive's totals were dropped (more changes at once than its watch could hold): the folder
+                // shown counts again instead of losing its numbers
+                if wp == 1 && PREFS.with_borrow(|p| p.folder_sizes) {
+                    let d = cur_dir();
+                    sizes::more(ST.with_borrow(|st| st.all.iter().filter(|r| r.dir).map(|r| d.join(&r.name)).collect()));
+                }
+                InvalidateRect(ST.with_borrow(|st| st.list), ptr::null(), 0);
+                glist::invalidate();
+                0
+            }
             thumbs::WM_PIC => {
                 if thumbs::store(wp) { InvalidateRect(ST.with_borrow(|st| st.list), ptr::null(), 0); glist::invalidate(); }
                 0
