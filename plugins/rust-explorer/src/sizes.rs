@@ -10,6 +10,9 @@
 //!   just the folder it happened in and moves the difference up through the counted folders above it. Totals on a
 //!   watched drive therefore stay right for the whole session; elsewhere they are trusted for two minutes.
 //!
+//! - HDD mode (a setting): on a hard disk only one folder is listed at a time, the folders one after another, so its
+//!   head does not seek back and forth between the threads (slow for the count and for every other program).
+//!
 //! Folders on network drives are left alone.
 #![allow(unsafe_op_in_unsafe_fn)]
 use std::{
@@ -86,6 +89,40 @@ static START: OnceLock<Instant> = OnceLock::new();
 fn now() -> u32 { START.get_or_init(Instant::now).elapsed().as_secs() as u32 }
 
 static WATCHING: AtomicU32 = AtomicU32::new(0); // drives whose changes are followed (bit = drive)
+pub static HDD_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false); // the setting
+static HDD_KNOWN: AtomicU32 = AtomicU32::new(0); // drives asked whether they are hard disks
+static HDD: AtomicU32 = AtomicU32::new(0); // the hard disks among them
+
+/// Is drive `d` a hard disk (it has to seek)? Asked once per drive; anything that cannot tell counts as no.
+fn is_hdd(d: u8) -> bool {
+    if d >= 26 { return false; }
+    let bit = 1 << d;
+    if HDD_KNOWN.load(Relaxed) & bit == 0 {
+        if unsafe { seek_penalty(d) } == Some(true) { HDD.fetch_or(bit, Relaxed); }
+        HDD_KNOWN.fetch_or(bit, Relaxed);
+    }
+    HDD.load(Relaxed) & bit != 0
+}
+
+/// Whether the disk under drive `d` has to seek (IOCTL_STORAGE_QUERY_PROPERTY, StorageDeviceSeekPenaltyProperty: no
+/// admin needed, the volume is opened without access rights).
+unsafe fn seek_penalty(d: u8) -> Option<bool> {
+    use windows_sys::Win32::{Foundation::*, Storage::FileSystem::*, System::IO::DeviceIoControl};
+    #[repr(C)]
+    struct Query { id: u32, kind: u32, extra: [u8; 4] }
+    #[repr(C)]
+    #[derive(Default)]
+    struct Desc { version: u32, size: u32, seeks: u8 }
+    let path: Vec<u16> = format!(r"\\.\{}:", (b'A' + d) as char).encode_utf16().chain([0]).collect();
+    let h = CreateFileW(path.as_ptr(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, std::ptr::null(), OPEN_EXISTING, 0, std::ptr::null_mut());
+    if h == INVALID_HANDLE_VALUE { return None; }
+    let q = Query { id: 7, kind: 0, extra: [0; 4] }; // StorageDeviceSeekPenaltyProperty, PropertyStandardQuery
+    let mut out = Desc::default();
+    let mut got = 0u32;
+    let ok = DeviceIoControl(h, 0x002D_1400, &q as *const _ as *const _, size_of::<Query>() as u32, &mut out as *mut _ as *mut _, size_of::<Desc>() as u32, &mut got, std::ptr::null_mut()) != 0;
+    CloseHandle(h);
+    (ok && got as usize >= size_of::<Desc>() - 3).then_some(out.seeks != 0)
+}
 static STARTED: AtomicU32 = AtomicU32::new(0); // drives a watch was tried on
 
 fn watched(d: u8) -> bool { d < 32 && WATCHING.load(Relaxed) & (1 << d) != 0 }
@@ -107,6 +144,7 @@ struct Walk {
     root: PathBuf,
     root_parent: u64,
     drive: u8,
+    hdd: bool, // on a hard disk
     nodes: Vec<WNode>,
     todo: Vec<(u32, u64, PathBuf)>, // folders still to list: (node, key, path)
     busy: u32,                      // folders of it being listed right now
@@ -124,6 +162,7 @@ impl Walk {
             root: root.to_path_buf(),
             root_parent: root.parent().map_or(0, key),
             drive: drive(root),
+            hdd: is_hdd(drive(root)),
             nodes: vec![WNode { key: k, parent: ROOT, own: Own::default(), acc: Sum::default(), wait: 1 }],
             todo: vec![(0, k, root.to_path_buf())],
             busy: 0,
@@ -207,8 +246,8 @@ fn walk_here(root: &Path) -> Option<Sum> {
     get(root)
 }
 
-struct Sched { walks: Vec<Walk>, next: u64 }
-static SCHED: LazyLock<(Mutex<Sched>, Condvar)> = LazyLock::new(|| (Mutex::new(Sched { walks: vec![], next: 1 }), Condvar::new()));
+struct Sched { walks: Vec<Walk>, next: u64, listing: [u32; 256] } // listing: folders being listed now, per drive
+static SCHED: LazyLock<(Mutex<Sched>, Condvar)> = LazyLock::new(|| (Mutex::new(Sched { walks: vec![], next: 1, listing: [0; 256] }), Condvar::new()));
 static MAIN: AtomicU64 = AtomicU64::new(0); // the window told when totals change
 static LAST_NOTE: AtomicU64 = AtomicU64::new(0);
 
@@ -242,16 +281,24 @@ fn add(s: &mut Sched, dirs: Vec<PathBuf>) {
 }
 
 /// The next folder for a counting thread: one of the walk it is on; else a walk nobody is on yet (in the order asked);
-/// else one of the walk with the most folders waiting.
-fn take(s: &mut Sched, mine: &mut u64) -> Option<(u64, u32, u64, PathBuf)> {
-    let i = s.walks.iter().position(|w| w.id == *mine && !w.todo.is_empty())
-        .or_else(|| s.walks.iter().position(|w| w.busy == 0 && !w.todo.is_empty()))
-        .or_else(|| s.walks.iter().enumerate().filter(|(_, w)| !w.todo.is_empty()).max_by_key(|(_, w)| w.todo.len()).map(|(i, _)| i))?;
+/// else one of the walk with the most folders waiting. With `hdd_mode`, a hard disk gets one folder listed at a time,
+/// always of its oldest walk (one folder tree after the other: the head stays where it is).
+fn take(s: &mut Sched, mine: &mut u64, hdd_mode: bool) -> Option<(u64, u32, u64, PathBuf, u8)> {
+    let free = |s: &Sched, i: usize| {
+        let w = &s.walks[i];
+        !w.todo.is_empty() && (!(hdd_mode && w.hdd) || (s.listing[w.drive as usize] == 0 && s.walks.iter().position(|v| v.drive == w.drive) == Some(i)))
+    };
+    let n = s.walks.len();
+    let i = (0..n).find(|&i| s.walks[i].id == *mine && free(s, i))
+        .or_else(|| (0..n).find(|&i| s.walks[i].busy == 0 && free(s, i)))
+        .or_else(|| (0..n).filter(|&i| free(s, i)).max_by_key(|&i| s.walks[i].todo.len()))?;
     let w = &mut s.walks[i];
     let (n, k, p) = w.todo.pop()?;
     w.busy += 1;
     *mine = w.id;
-    Some((w.id, n, k, p))
+    let d = w.drive;
+    s.listing[d as usize] += 1;
+    Some((w.id, n, k, p, d))
 }
 
 /// Starts the counting threads; `main` gets WM_SIZES (at most every 200 ms) while totals change.
@@ -266,15 +313,17 @@ fn worker() {
     let (m, cv) = &*SCHED;
     let mut mine = 0;
     loop {
-        let (id, n, k, p) = {
+        let (id, n, k, p, d) = {
             let mut s = lock(m);
             loop {
-                if let Some(j) = take(&mut s, &mut mine) { break j; }
+                if let Some(j) = take(&mut s, &mut mine, HDD_MODE.load(Relaxed)) { break j; }
                 s = cv.wait(s).unwrap_or_else(|e| e.into_inner());
             }
         };
         let (own, kids) = list(&p, k);
         let mut s = lock(m);
+        s.listing[d as usize] -= 1;
+        cv.notify_all(); // a hard disk listing one folder at a time is free again
         let Some(i) = s.walks.iter().position(|w| w.id == id) else { continue }; // dropped meanwhile (another listing)
         let w = &mut s.walks[i];
         w.busy -= 1;
@@ -293,7 +342,6 @@ fn worker() {
                 drop(st);
                 note();
             }
-            if !w.todo.is_empty() { cv.notify_all(); }
         }
     }
 }
@@ -467,6 +515,28 @@ mod tests {
         println!("{} known without counting: {:?}", deep.display(), get(&deep));
         let n = lock(&STORE).len();
         println!("folders kept: {n} (~{} MB)", n * (std::mem::size_of::<(u64, Node)>() + 8) >> 20);
+    }
+
+    /// What the drives here say: `cargo test -p rust-explorer --release seek_penalty -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn seek_penalty_of_each_drive() {
+        for d in 0..26u8 { if let Some(hdd) = unsafe { seek_penalty(d) } { println!("{}: {}", (b'A' + d) as char, if hdd { "hard disk" } else { "no seeking (SSD)" }); } }
+    }
+
+    #[test]
+    fn hdd_mode_lists_one_folder_of_a_hard_disk_at_a_time() {
+        let walk = |id, root: &str, hdd| { let mut w = Walk::new(id, Path::new(root)); w.hdd = hdd; w.todo.push((0, 1, PathBuf::from(root))); w };
+        let mut s = Sched { walks: vec![walk(1, r"E:\a", true), walk(2, r"E:\b", true), walk(3, r"C:\c", false)], next: 4, listing: [0; 256] };
+        let (mut t1, mut t2, mut t3) = (0, 0, 0);
+        assert_eq!(take(&mut s, &mut t1, true).unwrap().0, 1);
+        assert_eq!(take(&mut s, &mut t2, true).unwrap().0, 3); // E: is busy: the SSD's walk instead
+        assert_eq!(take(&mut s, &mut t3, true).map(|j| j.0), Some(3));
+        assert!(take(&mut s, &mut 0, true).is_none()); // E: still busy, C: done
+        s.listing[4] = 0; // the folder of E: listed
+        assert_eq!(take(&mut s, &mut t2, true).unwrap().0, 1); // the oldest walk of E: first, not b
+        s.listing[4] = 0;
+        assert_eq!(take(&mut s, &mut 0, false).unwrap().0, 2); // without the mode: anything waiting
     }
 
     #[test]

@@ -10,7 +10,7 @@ pub const CLASS: &str = "RxOptions";
 type Get = fn(&prefs::Prefs) -> bool;
 type Set = fn(&mut prefs::Prefs, bool);
 
-const ROWS: [(&str, &str, Get, Set); 7] = [
+const ROWS: [(&str, &str, Get, Set); 8] = [
     ("Reopen the last tabs", "Start where you left off instead of on Home", |p| p.restore_tabs, |p, v| p.restore_tabs = v),
     ("Type to filter", "Typing in the list filters it, like Ctrl+F", |p| p.type_filter, |p, v| p.type_filter = v),
     ("Filter searches subfolders", "The filter looks through every folder below (Ctrl+E)", |p| p.subfolders, |p, v| p.subfolders = v),
@@ -18,6 +18,7 @@ const ROWS: [(&str, &str, Get, Set); 7] = [
     ("Folders first", "Keep folders above files whatever the sort", |p| p.folders_first, |p, v| p.folders_first = v),
     ("Recent places", "Folders and files opened lately, at the top of the side pane", |p| p.recents, |p, v| p.recents = v),
     ("Folder sizes", "Count what is inside each folder: size, folders and files", |p| p.folder_sizes, |p, v| p.folder_sizes = v),
+    ("HDD mode", "Folder sizes on hard disks are counted one folder at a time", |p| p.hdd_mode, |p, v| p.hdd_mode = v),
 ];
 const CLEAR: usize = ROWS.len(); // the "Clear recent places" button
 const UNHIDE: usize = ROWS.len() + 1; // "Show hidden menu items" (those hidden with Delete in a menu)

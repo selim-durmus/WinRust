@@ -675,6 +675,7 @@ fn set_prefs(h: HWND, f: impl FnOnce(&mut prefs::Prefs), reload_now: bool) {
     prefs::save(&p);
     SHOW_HIDDEN.store(p.hidden, Relaxed);
     FOLDERS_FIRST.store(p.folders_first, Relaxed);
+    sizes::HDD_MODE.store(p.hdd_mode, Relaxed);
     FILT.with_borrow_mut(|f| f.sub = p.subfolders);
     filter_cue();
     ui::nav_rebuild();
@@ -2029,6 +2030,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                     SetTimer(h, 7, 2000, None); // live wallpaper on / off (desk::check_live)
                 } else {
                     thumbs::start(h as isize);
+                    sizes::HDD_MODE.store(prefs_now().hdd_mode, Relaxed);
                     sizes::start(h as isize);
                     // the same columns, in the same order, as Explorer's details view
                     // the same columns as Explorer's details view, plus what is inside each folder (sizes.rs), like File Pilot
