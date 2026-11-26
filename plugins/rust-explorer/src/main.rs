@@ -32,6 +32,7 @@ mod glist; // the GPU-drawn list (smooth scrolling), being built
 mod menu; // our own right-click menu
 mod opts; // the settings page
 mod prefs; // settings, session, recents and bookmarks on disk
+mod shwin; // a folder window to the shell, like Explorer's: "Show in folder" of other programs selects the item
 mod sizes; // what is inside each folder, counted in the background
 mod thumbs; // pictures of the icon view, drawn at any zoom
 mod ui; // the look: palette, painted tabs / toolbar / address pill / status line, dark theme
@@ -373,6 +374,7 @@ fn commit(h: HWND, dir: PathBuf, rows: Vec<Row>, record: bool) {
         thumbs::clear(); // the pictures of the folder left behind
         filter_clear();
         watch(h, &dir);
+        shwin::navigated(h, &dir);
         remember(dir.clone());
         save_session();
     }
@@ -380,6 +382,30 @@ fn commit(h: HWND, dir: PathBuf, rows: Vec<Row>, record: bool) {
     if let Some(n) = fresh {
         let (list, i) = ST.with_borrow(|st| (st.list, st.rows.iter().position(|r| r.name == n)));
         if let Some(i) = i { unsafe { SetFocus(list) }; edit_label(list, i); }
+    }
+    if shwin::wants_select() { unsafe { PostMessageW(h, shwin::WM_SHWIN, 1, 0) }; } // asked for while the folder was listing
+}
+
+/// Selects what the shell asked for ("Show in folder" of another program: the downloaded file) and brings the window
+/// up. Waits for a listing still on its way (commit posts the request again).
+fn shell_select(h: HWND) {
+    if PENDING.with_borrow(|p| p.is_some()) { return; }
+    let Some(names) = shwin::take_select() else { return };
+    if filtering() { filter_clear(); show(h, &[], 0); }
+    let names: Vec<String> = names.iter().map(|n| n.to_lowercase()).collect();
+    let (list, idx) = ST.with_borrow(|st| (st.list, st.rows.iter().enumerate().filter(|(_, r)| names.contains(&r.name.to_lowercase())).map(|(i, _)| i).collect::<Vec<_>>()));
+    unsafe {
+        put(list, LVM_SETITEMSTATE, usize::MAX, &LVITEMW { stateMask: LVIS_SELECTED | LVIS_FOCUSED, state: 0, ..std::mem::zeroed() } as *const _ as isize);
+        for (k, &i) in idx.iter().enumerate() {
+            let state = LVIS_SELECTED | if k == 0 { LVIS_FOCUSED } else { 0 };
+            put(list, LVM_SETITEMSTATE, i, &LVITEMW { stateMask: LVIS_SELECTED | LVIS_FOCUSED, state, ..std::mem::zeroed() } as *const _ as isize);
+        }
+        if let Some(&i) = idx.first() { put(list, LVM_ENSUREVISIBLE, i, 0); }
+        glist::show_focused();
+        ui::status_dirty(h);
+        if IsIconic(h) != 0 { ShowWindow(h, SW_RESTORE); }
+        SetForegroundWindow(h);
+        SetFocus(list);
     }
 }
 
@@ -2419,7 +2445,15 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
             WM_TIMER if !desk() && wp == ZOOM_TIMER => { zoom_tick(h); 0 }
             WM_TIMER if !desk() && wp == PREFS_TIMER => { KillTimer(h, PREFS_TIMER); prefs::save(&prefs_now()); 0 }
             WM_TIMER if desk() && wp == 7 => { desk::check_live(ST.with_borrow(|st| st.list)); 0 }
-            WM_DESTROY => { PostQuitMessage(0); 0 }
+            WM_DESTROY => { shwin::gone(); PostQuitMessage(0); 0 }
+            shwin::WM_SHWIN => {
+                match wp {
+                    0 => shwin::update(h),
+                    1 => shell_select(h),
+                    _ => if let Some(p) = shwin::take_browse() { load(h, p) },
+                }
+                0
+            }
             _ => DefWindowProcW(h, m, wp, lp),
         }
     }

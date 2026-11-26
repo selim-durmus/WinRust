@@ -412,6 +412,12 @@ pub fn reset() {
     invalidate();
 }
 
+/// The focused item into view at once (selected from outside: "Show in folder").
+pub fn show_focused() {
+    if let Some(f) = focused() { show_now(f); }
+    invalidate();
+}
+
 /// The zoom step changed: pictures glide to the new size (between two picture sizes) or jump (another view).
 pub fn zoom(glide: bool) {
     let target = zoom_target();
