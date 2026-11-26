@@ -1,6 +1,7 @@
 """Draws the app icons (python scripts\\make-icons.py; needs Pillow) and writes `app.ico` next to each app.
 One look for all: a graphite rounded tile with a soft shadow and a faint top light, one glyph in the app's colour
-(the same colours as the page tiles of rust-settings). Everything is drawn 4x too big and shrunk with LANCZOS: smooth edges,
+(the same colours as the page tiles of rust-settings). The file manager is the exception: its folder alone, filling the
+icon, like the system's folder icons (on the tile it looked small in the taskbar). Everything is drawn 4x too big and shrunk with LANCZOS: smooth edges,
 and every ico frame is made from the master, not stretched from a small one."""
 import io, math, struct, sys
 from pathlib import Path
@@ -93,6 +94,23 @@ def folder(c, col):
     paint(c, mask(rr((250, 438, 774, 740), 64)), col)
 
 
+def folder_full(c, col):
+    """The file manager's folder on its own, as big as the icon (no tile): a soft shadow, the back with its tab, the front."""
+    l, r, top, bottom = 52, M - 52, 150, M - 150
+    back = mask(union(rr((l, top, 470, top + 190), 84), rr((l, top + 80, r, bottom), 92)))
+    front = mask(rr((l, top + 196, r, bottom), 92))
+    sh = Image.new("RGBA", (M, M), (0, 0, 0, 0))
+    sh.paste((0, 0, 0, 110), (0, 22), ImageChops.lighter(back, front).filter(ImageFilter.GaussianBlur(22)))
+    c.alpha_composite(sh)
+    paint(c, back, darker(col, 0.28))
+    paint(c, front, col)
+    # a faint light along the top edge of the front
+    edge = ImageChops.subtract(front, mask(rr((l, top + 214, r, bottom), 92)))
+    hl = Image.new("RGBA", (M, M), (255, 255, 255, 0))
+    hl.putalpha(edge.point(lambda v: v * 70 // 255))
+    c.alpha_composite(hl)
+
+
 def gear(c, col):
     n, ro, ri = 8, 330, 262
     pts = []
@@ -134,7 +152,7 @@ def package(c, col):
 
 
 APPS = {
-    "plugins/rust-explorer": (folder, (10, 132, 255)),
+    "plugins/rust-explorer": (folder_full, (10, 132, 255), False),
     "plugins/rust-settings": (gear, (174, 180, 194)),
     "plugins/topbar": (bar, (124, 134, 255)),
     "plugins/wiztree": (treemap, (255, 159, 10)),
@@ -143,8 +161,8 @@ APPS = {
 }
 
 
-def render(glyph, col):
-    base, _ = tile()
+def render(glyph, col, with_tile=True):
+    base = tile()[0] if with_tile else Image.new("RGBA", (M, M), (0, 0, 0, 0))
     layer = Image.new("RGBA", (M, M), (0, 0, 0, 0))
     glyph(layer, col)
     return Image.alpha_composite(base, layer)
@@ -169,8 +187,8 @@ def write_ico(path, img):
 
 if __name__ == "__main__":
     sheet = Image.new("RGBA", (256 * len(APPS), 256), (255, 255, 255, 0))
-    for i, (rel, (glyph, col)) in enumerate(APPS.items()):
-        img = render(glyph, col)
+    for i, (rel, (glyph, col, *opt)) in enumerate(APPS.items()):
+        img = render(glyph, col, *opt)
         write_ico(ROOT / rel / "app.ico", img)
         sheet.paste(img.resize((256, 256), Image.LANCZOS), (256 * i, 0))
     if len(sys.argv) > 1:
