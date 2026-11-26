@@ -57,6 +57,13 @@ pub fn get(p: &Path, px: i32) -> Option<(isize, i32, i32)> {
     })
 }
 
+/// Like get(), for the GPU list: (width, height, its pixels: premultiplied BGRA, top row first). The pixels stay valid
+/// until the next WM_PIC or clear() (they are copied to the GPU right away).
+pub fn pixels(p: &Path, px: i32) -> Option<(i32, i32, *const u8)> {
+    get(p, px)?;
+    CACHE.with_borrow(|c| match c.get(p) { Some(Slot::Ready(pic, _)) => Some((pic.img.w, pic.img.h, pic.img._px.as_ptr())), _ => None })
+}
+
 /// A new folder: every picture goes.
 pub fn clear() {
     ERA.fetch_add(1, Relaxed);

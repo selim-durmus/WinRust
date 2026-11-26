@@ -1242,7 +1242,7 @@ unsafe fn paint_chrome(hwnd: HWND) {
     SelectObject(dc, old);
     DeleteObject(bmp);
     DeleteDC(dc);
-    if BUSY.get() { SetTimer(hwnd, 4, 16, None); } else { KillTimer(hwnd, 4); }
+    crate::glist::frames(crate::glist::SLOT_CHROME, hwnd, BUSY.get()); // hover fades at the screen's rate
     EndPaint(hwnd, &ps);
 }
 
@@ -1292,7 +1292,7 @@ pub unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> L
             return HTCLIENT as isize;
         }
         WM_SIZE => { place_edit(h); InvalidateRect(h, ptr::null(), 0); } // the pill and the tabs re-flow: repaint it all
-        WM_TIMER if wp == 4 => { InvalidateRect(h, ptr::null(), 0); }
+        crate::glist::WM_FRAME => { crate::glist::frame_done(crate::glist::SLOT_CHROME); RedrawWindow(h, ptr::null(), ptr::null_mut(), RDW_INVALIDATE | RDW_UPDATENOW); }
         WM_MOUSEMOVE => {
             let k = match hit(&layout_now(), x, y) { NONE => crumb_at(x, y).map_or(NONE, |i| CRUMB + i as i32), k => k };
             let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: h, dwHoverTime: 0 };
@@ -2058,9 +2058,13 @@ unsafe fn paint_nav(hwnd: HWND) {
     SelectObject(dc, old);
     DeleteObject(bmp);
     DeleteDC(dc);
-    if BUSY.get() { SetTimer(hwnd, 4, 16, None); } else { KillTimer(hwnd, 4); }
+    let glide = NAVTOP.get() != NAVGOAL.get();
+    if !glide { NAVT.set(None); }
+    crate::glist::frames(crate::glist::SLOT_NAV, hwnd, BUSY.get() || glide);
     EndPaint(hwnd, &ps);
 }
+
+thread_local! { static NAVT: Cell<Option<std::time::Instant>> = const { Cell::new(None) }; } // the side pane's last glide frame
 
 pub unsafe extern "system" fn nav_proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let y = ((lp >> 16) & 0xFFFF) as i16 as i32;
@@ -2092,7 +2096,19 @@ pub unsafe extern "system" fn nav_proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) 
             let d = ((wp >> 16) & 0xFFFF) as i16 as i32;
             NAVGOAL.set(NAVGOAL.get() - d * sc(NAV_ROW) * 3 / 120);
             clamp_scroll();
-            SetTimer(h, 5, 10, None);
+            crate::glist::frames(crate::glist::SLOT_NAV, h, true); // glides there, a step per screen refresh
+        }
+        crate::glist::WM_FRAME => {
+            crate::glist::frame_done(crate::glist::SLOT_NAV);
+            let now = std::time::Instant::now();
+            let dt = NAVT.replace(Some(now)).map_or(1.0 / 120.0, |t| (now - t).as_secs_f32()).min(0.05);
+            let (top, goal) = (NAVTOP.get(), NAVGOAL.get());
+            if top != goal {
+                let d = (goal - top) as f32;
+                let s = (d * (1.0 - (-dt * 18.0).exp())).round() as i32;
+                NAVTOP.set(if s == 0 { top + (goal - top).signum() } else { top + s });
+            }
+            RedrawWindow(h, ptr::null(), ptr::null_mut(), RDW_INVALIDATE | RDW_UPDATENOW);
         }
         WM_TIMER if wp == 5 => {
             let (top, goal) = (NAVTOP.get(), NAVGOAL.get());

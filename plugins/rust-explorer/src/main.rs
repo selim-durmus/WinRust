@@ -1032,6 +1032,12 @@ fn set_zoom(h: HWND, i: usize, refresh: bool) {
             if was == View::Tree || view == View::Tree { let (keep, top) = kept(); show(h, &keep, top); }
             after_resize(list);
         }
+        glist::zoom(false);
+    } else if glist::active() {
+        // the GPU list glides the pictures itself, at the screen's rate; the system list behind takes the size at once
+        SHOWN.set(size as f32);
+        apply_size(list, view, size as f32);
+        glist::zoom(true);
     } else {
         unsafe { SetTimer(h, ZOOM_TIMER, 15, None) };
     }
@@ -1042,6 +1048,9 @@ fn set_zoom(h: HWND, i: usize, refresh: bool) {
         ui::zoom_pop_show(); // the slider shows where the zoom is, like File Pilot's
     }
 }
+
+/// The picture size of the zoom step now (logical px), for the GPU list's glide.
+pub fn zoom_target() -> f32 { ZOOM[ZOOM_AT.get()].1 as f32 }
 
 /// (zoom step, number of steps), for the status corner and the slider.
 pub fn zoom_at() -> (usize, usize) { (ZOOM_AT.get(), ZOOM.len()) }
@@ -2371,7 +2380,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
             }
             sizes::WM_SIZES => { InvalidateRect(ST.with_borrow(|st| st.list), ptr::null(), 0); glist::invalidate(); 0 }
             thumbs::WM_PIC => {
-                if thumbs::store(wp) { InvalidateRect(ST.with_borrow(|st| st.list), ptr::null(), 0); }
+                if thumbs::store(wp) { InvalidateRect(ST.with_borrow(|st| st.list), ptr::null(), 0); glist::invalidate(); }
                 0
             }
             WM_GO => {
@@ -2399,6 +2408,14 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
 }
 
 fn main() {
+    // a panic ends the window (it happens inside a window procedure); what it was is kept in %TEMP%x-panic.log
+    std::panic::set_hook(Box::new(|info| {
+        use std::io::Write;
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(env::temp_dir().join("rx-panic.log")) {
+            let _ = writeln!(f, "{info}
+{}", std::backtrace::Backtrace::force_capture());
+        }
+    }));
     sh::init();
     unsafe {
         SetProcessDPIAware(); // sharp text at any scaling; every size below goes through ui::sc

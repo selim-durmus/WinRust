@@ -16,12 +16,11 @@ pub struct Prefs {
     pub zoom: usize,         // step of main.rs ZOOM: row height or picture size (Ctrl+wheel)
     pub folder_sizes: bool,  // count what is inside each folder (Folders / Files / Size columns)
     pub side_pane: bool,     // the side pane is shown (its button at the top left hides it)
-    pub smooth_list: bool,   // the GPU-drawn list (glist.rs) instead of the system one, while it is being built
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { restore_tabs: true, type_filter: true, subfolders: false, hidden: false, folders_first: true, recents: true, sort_col: 0, sort_asc: true, collapsed: vec![], zoom: 0, folder_sizes: true, side_pane: true, smooth_list: false }
+        Prefs { restore_tabs: true, type_filter: true, subfolders: false, hidden: false, folders_first: true, recents: true, sort_col: 0, sort_asc: true, collapsed: vec![], zoom: 0, folder_sizes: true, side_pane: true }
     }
 }
 
@@ -43,7 +42,6 @@ impl Prefs {
                 "sort_asc" => p.sort_asc = b,
                 "folder_sizes" => p.folder_sizes = b,
                 "side_pane" => p.side_pane = b,
-                "smooth_list" => p.smooth_list = b,
                 "view_zoom" => p.zoom = v.parse().unwrap_or(0usize), // "zoom" was the older table: ignored
                 "collapsed" => p.collapsed = v.split(',').filter_map(|x| x.trim().parse().ok()).collect(),
                 _ => {}
@@ -56,8 +54,8 @@ impl Prefs {
         let b = |v: bool| if v { "1" } else { "0" };
         let folded: Vec<String> = self.collapsed.iter().map(|c| c.to_string()).collect();
         format!(
-            "restore_tabs={}\ntype_filter={}\nsubfolders={}\nhidden={}\nfolders_first={}\nrecents={}\nsort_col={}\nsort_asc={}\ncollapsed={}\nview_zoom={}\nfolder_sizes={}\nside_pane={}\nsmooth_list={}\n",
-            b(self.restore_tabs), b(self.type_filter), b(self.subfolders), b(self.hidden), b(self.folders_first), b(self.recents), self.sort_col, b(self.sort_asc), folded.join(","), self.zoom, b(self.folder_sizes), b(self.side_pane), b(self.smooth_list)
+            "restore_tabs={}\ntype_filter={}\nsubfolders={}\nhidden={}\nfolders_first={}\nrecents={}\nsort_col={}\nsort_asc={}\ncollapsed={}\nview_zoom={}\nfolder_sizes={}\nside_pane={}\n",
+            b(self.restore_tabs), b(self.type_filter), b(self.subfolders), b(self.hidden), b(self.folders_first), b(self.recents), self.sort_col, b(self.sort_asc), folded.join(","), self.zoom, b(self.folder_sizes), b(self.side_pane)
         )
     }
 }
