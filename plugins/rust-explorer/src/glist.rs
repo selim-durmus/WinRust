@@ -873,12 +873,12 @@ unsafe fn draw_rows(g: &mut Gpu, dc: &ID2D1DeviceContext, brush: &ID2D1SolidColo
                 let c = if s.done { dim } else { mix(dim, bg, 0.45) };
                 // while a total grows the numbers count up to it, each digit rolling into the next like a meter;
                 // at rest they are plain text again
-                let (now, moving) = tween(&full, [s.dirs as f64, s.files as f64, s.bytes as f64]);
-                if moving {
+                if let Some((now, unit)) = tween(&full, s) {
                     COUNTING.set(true);
+                    let (dec, suffix) = [(0, " KB"), (1, " MB"), (2, " GB")][unit as usize];
                     for (j, col) in [(0usize, 3usize), (1, 4), (2, 5)] {
-                        let (v, dec, sep, unit) = if j < 2 { (now[j], 0, true, "") } else { size_unit(now[2]) };
-                        meter(g, dc, brush, v, dec, sep, unit, x[col] + sc(10), y, rh, x[col + 1] - sc(8), c);
+                        let (dec, sep, suffix) = if j < 2 { (0, true, "") } else { (dec, false, suffix) };
+                        meter(g, dc, brush, now[j], dec, sep, suffix, x[col] + sc(10), y, rh, x[col + 1] - sc(8), c);
                     }
                 } else {
                     let n = |k: u32| if k == 0 { "\u{2013}".to_string() } else { thousands(k as usize) };
@@ -898,38 +898,48 @@ unsafe fn draw_rows(g: &mut Gpu, dc: &ID2D1DeviceContext, brush: &ID2D1SolidColo
 
 // ---------- the rolling counts ----------
 
-/// A folder's totals as shown: they follow the real ones, counting up (or down) to them.
-struct Tween { shown: [f64; 3], at: Instant, live: bool }
+/// A folder's totals as shown, in the units the columns show them (folders, files, the size as a whole number of its
+/// last shown digit: KB, tenths of MB, hundredths of GB): gliding from `from` to `to` since `t0`.
+struct Tween { from: [f64; 3], to: [f64; 3], t0: Instant, unit: u8 }
+
+/// How long the numbers take to reach a new total (from where they are).
+const COUNT_S: f32 = 0.35;
 
 thread_local! {
     static COUNTS: RefCell<HashMap<PathBuf, Tween>> = RefCell::new(HashMap::new());
     static COUNTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; // some count still on its way: frames go on
 }
 
-/// The totals of folder `p` to show this frame on their way to `target` (folders, files, bytes), and whether they are
-/// still moving. Seen for the first time, they show as they are (nothing counts up when a folder opens).
-fn tween(p: &Path, target: [f64; 3]) -> ([f64; 3], bool) {
-    COUNTS.with_borrow_mut(|m| {
-        let now = Instant::now();
-        let t = m.entry(p.to_path_buf()).or_insert(Tween { shown: target, at: now, live: false });
-        if t.shown == target { t.live = false; return (target, false); }
-        // a part of the way each frame, by the time since the frame before (one frame's when it just started)
-        let dt = if t.live { (now - t.at).as_secs_f64().min(0.05) } else { 1.0 / 120.0 };
-        t.at = now;
-        t.live = true;
-        let k = 1.0 - (-dt / 0.14).exp();
-        for j in 0..3 {
-            let d = target[j] - t.shown[j];
-            if d.abs() <= 0.5 + target[j].abs() * 2e-5 { t.shown[j] = target[j]; } else { t.shown[j] += d * k; }
-        }
-        (t.shown, true)
-    })
+/// Bytes as the size column shows them (size_text): (unit 0 KB / 1 MB / 2 GB, the size in steps of its last digit).
+fn size_steps(b: u64) -> (u8, f64) {
+    const MB: u64 = 1 << 20;
+    if b < MB { (0, b.div_ceil(1024) as f64) } else if b < MB << 10 { (1, (b as f64 * 10.0 / MB as f64).round()) } else { (2, (b as f64 * 100.0 / (MB << 10) as f64).round()) }
 }
 
-/// Bytes as the size column shows them: (value in its unit, decimals, thousands marks, unit), like size_text.
-fn size_unit(b: f64) -> (f64, u32, bool, &'static str) {
-    const MB: f64 = (1u64 << 20) as f64;
-    if b < MB { (b / 1024.0, 0, false, " KB") } else if b < MB * 1024.0 { (b / MB, 1, false, " MB") } else { (b / (MB * 1024.0), 2, false, " GB") }
+/// Bytes in one step of `unit`'s last digit.
+fn step_bytes(unit: u8) -> f64 { [1024.0, (1u64 << 20) as f64 / 10.0, (1u64 << 30) as f64 / 100.0][unit as usize] }
+
+/// Folder `p`'s totals for this frame, while they are on their way to `s`: (folders, files, size steps; the unit), or
+/// None when they show as they are. Only what the columns show counts: a change too small to show moves nothing (a
+/// few KB more in a folder of gigabytes). Seen for the first time, they show as they are (nothing counts up when a
+/// folder opens); a new total on the way glides on from where the numbers are, ending right on it.
+fn tween(p: &Path, s: sizes::Sum) -> Option<([f64; 3], u8)> {
+    let (unit, steps) = size_steps(s.bytes);
+    let to = [s.dirs as f64, s.files as f64, steps];
+    COUNTS.with_borrow_mut(|m| {
+        let now = Instant::now();
+        let t = m.entry(p.to_path_buf()).or_insert(Tween { from: to, to, t0: now, unit });
+        let at = |t: &Tween| {
+            let e = ease((now - t.t0).as_secs_f32() / COUNT_S) as f64;
+            [0, 1, 2].map(|j| t.from[j] + (t.to[j] - t.from[j]) * e)
+        };
+        if t.to != to {
+            let mut cur = at(t);
+            if t.unit != unit { cur[2] = cur[2] * step_bytes(t.unit) / step_bytes(unit); } // KB -> MB -> GB: the same size
+            *t = Tween { from: cur, to, t0: now, unit };
+        }
+        ((now - t.t0).as_secs_f32() < COUNT_S && t.from != t.to).then(|| (at(t), t.unit))
+    })
 }
 
 /// One digit or mark of the rolling counts, laid out once: (layout, width).
@@ -950,7 +960,7 @@ unsafe fn meter(g: &mut Gpu, dc: &ID2D1DeviceContext, brush: &ID2D1SolidColorBru
     const DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
     let band = (sc(12) as f32 * 1.45).ceil();
     let top = y as f32 + (rh as f32 - band) / 2.0;
-    let n = x.max(0.0) * 10f64.powi(dec as i32);
+    let n = x.max(0.0); // in steps of the last digit (`dec` of them after the point)
     let mut count = dec + 1; // digits drawn: at least one before the point
     while count < 19 && 10f64.powi(count as i32) <= n.floor() { count += 1; }
     brush.SetColor(&color(c));
@@ -1379,4 +1389,34 @@ pub unsafe fn create(parent: HWND) {
     let h = CreateWindowExW(0, w(CLASS).as_ptr(), ptr::null(), WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 0, 0, parent, ptr::null_mut(), GetModuleHandleW(ptr::null()), ptr::null());
     SLOT_WND[SLOT_LIST].store(h as isize, Relaxed);
     let _ = sh::register_drop(h as _, parent as isize);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rolling size ends on exactly what the plain text shows, in every unit.
+    #[test]
+    fn size_steps_match_the_size_column() {
+        for b in [0u64, 1, 1023, 1024, 1025, 500_000, 1 << 20, 3_456_789, 1_073_741_823, 1 << 30, 178_921_857_063, 5_000_000_000_000] {
+            let (unit, steps) = size_steps(b);
+            let (dec, suffix) = [(0usize, " KB"), (1, " MB"), (2, " GB")][unit as usize];
+            let shown = format!("{:.*}{suffix}", dec, steps / 10f64.powi(dec as i32));
+            assert_eq!(shown, size_text(b), "{b} bytes");
+        }
+    }
+
+    /// A change too small for the columns to show rolls no digit; a bigger one glides and ends on the new total.
+    #[test]
+    fn counts_roll_only_for_changes_that_show() {
+        let p = Path::new(r"C:\rx-tween-test");
+        let gb = |x: f64| sizes::Sum { bytes: (x * (1u64 << 30) as f64) as u64, dirs: 5, files: 9, done: true };
+        assert!(tween(p, gb(166.57)).is_none()); // first seen: as it is
+        assert!(tween(p, sizes::Sum { bytes: gb(166.57).bytes + 4096, ..gb(166.57) }).is_none()); // 4 KB more: nothing shows
+        let (now, unit) = tween(p, gb(166.80)).unwrap();
+        assert_eq!(unit, 2);
+        assert!(now[2] >= 16657.0 && now[2] < 16680.0);
+        COUNTS.with_borrow_mut(|m| m.get_mut(p).unwrap().t0 -= std::time::Duration::from_secs(1));
+        assert!(tween(p, gb(166.80)).is_none()); // there: plain text again
+    }
 }
