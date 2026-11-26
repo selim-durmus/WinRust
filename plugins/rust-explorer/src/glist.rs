@@ -1150,7 +1150,9 @@ pub unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> L
             let moving = step();
             if moving && V.with_borrow(|v| matches!(&v.drag, Drag::Box(b) if b.active)) { box_select(); }
             render();
-            if !moving { animate(false); fps_flush(); }
+            // a count that started rolling in this very frame wants the next ones too: stopping the frames here left
+            // its digits half turned until the next total came
+            if !moving && !COUNTING.get() { animate(false); fps_flush(); }
             0
         }
         WM_EDIT_DONE => { end_rename(wp == 1); 0 }
