@@ -28,6 +28,7 @@ use std::{cell::{Cell, RefCell}, env, fs, os::windows::ffi::OsStrExt, path::{Pat
 use windows_sys::Win32::{Foundation::*, Graphics::Gdi::{BLACK_BRUSH, GetStockObject, InvalidateRect}, System::LibraryLoader::GetModuleHandleW, UI::{Controls::*, Input::KeyboardAndMouse::{GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_SHIFT}, Shell::*, WindowsAndMessaging::*}};
 
 mod fsx; // fast listing and the subfolder crawl
+mod glist; // the GPU-drawn list (smooth scrolling), being built
 mod menu; // our own right-click menu
 mod opts; // the settings page
 mod prefs; // settings, session, recents and bookmarks on disk
@@ -467,6 +468,8 @@ fn show(h: HWND, keep: &[String], top: isize) {
     put(list, WM_SETREDRAW, 1, 0);
     unsafe { InvalidateRect(list, ptr::null(), 0) };
     unsafe { ui::status_dirty(h) };
+    glist::reset();
+    ui::sync_lists();
 }
 
 /// Empty rows after the last one: room to right-click the folder itself (new folder, paste) in a full list.
@@ -675,6 +678,7 @@ fn set_prefs(h: HWND, f: impl FnOnce(&mut prefs::Prefs), reload_now: bool) {
     FILT.with_borrow_mut(|f| f.sub = p.subfolders);
     filter_cue();
     ui::nav_rebuild();
+    ui::sync_lists();
     if reload_now { reload(h); }
     // folder totals just turned on: counted for the folder shown (ones already known are not counted again)
     if p.folder_sizes && !desk() { let d = cur_dir(); sizes::ask(ST.with_borrow(|st| st.all.iter().filter(|r| r.dir).map(|r| d.join(&r.name)).collect())); }
@@ -718,6 +722,30 @@ fn toggle_mark(h: HWND, p: PathBuf) {
     ui::nav_rebuild();
     unsafe { InvalidateRect(ST.with_borrow(|st| st.tab), ptr::null(), 0) }; // the star
     let _ = h;
+}
+
+/// A click on a column title: sorts by it (again: the other way round). Both lists.
+fn sort_click(h: HWND, c: usize) {
+    let asc = if SORT_COL.load(Relaxed) == c { !SORT_ASC.load(Relaxed) } else { true };
+    let list = ST.with_borrow(|st| st.list);
+    SORT_COL.store(c, Relaxed);
+    SORT_ASC.store(asc, Relaxed);
+    // the whole header again: the column sorted before must lose its mark (only the clicked one was redrawn)
+    unsafe { InvalidateRect(put(ST.with_borrow(|st| st.list), LVM_GETHEADER, 0, 0) as HWND, ptr::null(), 0) };
+    if !desk() { set_prefs(h, |p| { p.sort_col = c; p.sort_asc = asc; }, false); }
+    let n = ST.with_borrow_mut(|st| {
+        // folder totals counted so far take part in the sort
+        let d = st.dir.clone();
+        for r in st.rows.iter_mut().chain(st.all.iter_mut()).filter(|r| r.dir) {
+            if let Some(s) = sizes::get(&d.join(&r.name)) { r.size = s.bytes; r.sub = (s.dirs, s.files); }
+        }
+        sort_rows(&mut st.rows, c, asc);
+        sort_rows(&mut st.all, c, asc);
+        if st.view == View::Tree { tree_refresh(); } // each open folder sorted on its own (rows_of sorts)
+        st.rows.len()
+    });
+    put(list, LVM_REDRAWITEMS, 0, n as isize - 1);
+    glist::reset();
 }
 
 /// Opens row `i`: a folder here, a picture in photoview, anything else with its program.
@@ -1999,6 +2027,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                 ST.with_borrow_mut(|st| { st.list = list; st.tab = tab; st.edit = edit; st.tabs = tabs; st.active = active; });
                 if !desk() { ui::place_edit(tab); }
                 let _ = sh::register_drop(list as _, h as isize);
+                if !desk() { glist::create(h); }
                 if !desk() { let _ = sh::register_tab_drop(tab as _, h as isize); let _ = sh::register_tab_drop(h as _, h as isize); }
                 // live wallpaper: the list is see-through (colour key), so over empty desktop OLE finds the wallpaper window under it,
                 // and walks up from there to the desktop window: it must accept the drop too
@@ -2201,27 +2230,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                         let (_, _, paths) = selected();
                         if !paths.is_empty() { menu_choice(h, sh::show(h, &paths).unwrap_or(sh::Choice::Done), &paths); } else { bg_menu(h); }
                     }
-                    LVN_COLUMNCLICK => {
-                        let c = (*(lp as *const NMLISTVIEW)).iSubItem as usize;
-                        let asc = if SORT_COL.load(Relaxed) == c { !SORT_ASC.load(Relaxed) } else { true };
-                        SORT_COL.store(c, Relaxed);
-                        SORT_ASC.store(asc, Relaxed);
-                        // the whole header again: the column sorted before must lose its mark (only the clicked one was redrawn)
-                        InvalidateRect(put(ST.with_borrow(|st| st.list), LVM_GETHEADER, 0, 0) as HWND, ptr::null(), 0);
-                        if !desk() { set_prefs(h, |p| { p.sort_col = c; p.sort_asc = asc; }, false); }
-                        let n = ST.with_borrow_mut(|st| {
-                            // folder totals counted so far take part in the sort
-                            let d = st.dir.clone();
-                            for r in st.rows.iter_mut().chain(st.all.iter_mut()).filter(|r| r.dir) {
-                                if let Some(s) = sizes::get(&d.join(&r.name)) { r.size = s.bytes; r.sub = (s.dirs, s.files); }
-                            }
-                            sort_rows(&mut st.rows, c, asc);
-                            sort_rows(&mut st.all, c, asc);
-                            if st.view == View::Tree { tree_refresh(); } // each open folder sorted on its own (rows_of sorts)
-                            st.rows.len()
-                        });
-                        put(list, LVM_REDRAWITEMS, 0, n as isize - 1);
-                    }
+                    LVN_COLUMNCLICK => sort_click(h, (*(lp as *const NMLISTVIEW)).iSubItem as usize),
                     LVN_BEGINDRAG => {
                         let (_, _, paths) = selected();
                         drag_log(&format!("BEGINDRAG desk={} selected={}", desk(), paths.len()));
@@ -2355,7 +2364,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                 }
                 0
             }
-            sizes::WM_SIZES => { InvalidateRect(ST.with_borrow(|st| st.list), ptr::null(), 0); 0 }
+            sizes::WM_SIZES => { InvalidateRect(ST.with_borrow(|st| st.list), ptr::null(), 0); glist::invalidate(); 0 }
             thumbs::WM_PIC => {
                 if thumbs::store(wp) { InvalidateRect(ST.with_borrow(|st| st.list), ptr::null(), 0); }
                 0
@@ -2398,6 +2407,7 @@ fn main() {
         // desktop without a wallpaper file shows black, not window white
         let bg = if desktop { GetStockObject(BLACK_BRUSH) as _ } else { windows_sys::Win32::Graphics::Gdi::CreateSolidBrush(ui::pal().bg) };
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(ui::proc), hInstance: inst, lpszClassName: w("RxChrome").as_ptr(), hCursor: LoadCursorW(0 as _, IDC_ARROW), ..std::mem::zeroed() });
+        RegisterClassW(&WNDCLASSW { style: CS_DBLCLKS, lpfnWndProc: Some(glist::proc), hInstance: inst, lpszClassName: w(glist::CLASS).as_ptr(), hCursor: LoadCursorW(0 as _, IDC_ARROW), ..std::mem::zeroed() });
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(ui::nav_proc), hInstance: inst, lpszClassName: w("RxNav").as_ptr(), hCursor: LoadCursorW(0 as _, IDC_ARROW), ..std::mem::zeroed() });
         // the menu's windows cast a shadow (CS_DROPSHADOW)
         RegisterClassW(&WNDCLASSW { style: 0x0002_0000, lpfnWndProc: Some(menu::proc), hInstance: inst, lpszClassName: w(menu::CLASS).as_ptr(), hCursor: LoadCursorW(0 as _, IDC_ARROW), ..std::mem::zeroed() });

@@ -79,6 +79,9 @@ pub fn init_scale() {
 
 pub fn sc(v: i32) -> i32 { (v as f32 * SCALE.get()).round() as i32 }
 
+/// The Details rows' height now (px, from the zoom).
+pub fn row_px() -> i32 { sc(ROW.get()) }
+
 fn now() -> u64 { unsafe { GetTickCount64() } }
 
 fn ease(t: f32) -> f32 { t * t * (3.0 - 2.0 * t) }
@@ -247,7 +250,7 @@ thread_local! {
 
 /// The system's icons in every size they come in (small, large, extra large, jumbo), smallest first: (image list, px).
 /// Indexes are the same in all of them.
-fn sys_lists() -> [(isize, i32); 4] {
+pub(crate) fn sys_lists() -> [(isize, i32); 4] {
     if SYS.get()[0].0 == 0 {
         let iid = windows_sys::core::GUID::from_u128(0x46eb5926_582e_4017_9fdf_e8998daa0950); // IID_IImageList
         let mut v = [(0isize, 0i32); 4];
@@ -284,7 +287,7 @@ thread_local! {
 }
 
 /// "Today, 09:48" / "Yesterday, 21:50" for recent files, the plain date otherwise.
-fn friendly_date(ft: u64) -> String {
+pub(crate) fn friendly_date(ft: u64) -> String {
     let s = date_text(ft);
     let mut now: windows_sys::Win32::Foundation::FILETIME = unsafe { std::mem::zeroed() };
     unsafe { windows_sys::Win32::System::SystemInformation::GetSystemTimeAsFileTime(&mut now) };
@@ -777,7 +780,8 @@ unsafe fn scroll_tick(h: HWND) {
     let moved = GetScrollPos(h, SB_VERT as i32) != before;
     let rest = left - step;
     SCROLL_LEFT.set(if moved && rest.signum() == left.signum() { rest } else { 0 }); // past the goal: done
-    if !moved || SCROLL_LEFT.get() == 0 || step == 0 { SCROLL_LEFT.set(0); KillTimer(h, SCROLL_TIMER); }
+    if moved { crate::glist::fps_mark("old", (GetScrollPos(h, SB_VERT as i32) * row_px()) as f32); }
+    if !moved || SCROLL_LEFT.get() == 0 || step == 0 { SCROLL_LEFT.set(0); KillTimer(h, SCROLL_TIMER); crate::glist::fps_flush(); }
 }
 
 /// Repaints one row (hover moved on or off it).
@@ -1903,6 +1907,20 @@ fn clamp_scroll() {
     NAVGOAL.set(NAVGOAL.get().clamp(0, max));
 }
 
+/// Shows the GPU list or the system one (the setting and the view decide); the focus follows.
+pub fn sync_lists() {
+    let (list, g) = (ST.with(|c| c.try_borrow().map_or(ptr::null_mut(), |s| s.list)), crate::glist::hwnd());
+    if list.is_null() || g.is_null() { return; }
+    let want = crate::glist::wanted();
+    unsafe {
+        ShowWindow(g, if want { SW_SHOW } else { SW_HIDE });
+        ShowWindow(list, if want { SW_HIDE } else { SW_SHOW });
+        let f = GetFocus();
+        if want && f == list { SetFocus(g); } else if !want && f == g { SetFocus(list); }
+    }
+    if want { crate::glist::invalidate(); }
+}
+
 /// Chrome on top, the pane on the left (hidden when the window is narrow), the list takes the rest down to the bottom
 /// edge, the filter and the status float over its bottom corners.
 pub unsafe fn layout_children(cw: i32, ch: i32) {
@@ -1915,6 +1933,8 @@ pub unsafe fn layout_children(cw: i32, ch: i32) {
     MoveWindow(nav, 0, 0, nw, ch, 1);
     MoveWindow(chrome, nw, 0, cw - nw, top, 1);
     MoveWindow(list, nw, top, cw - nw, h, 1);
+    MoveWindow(crate::glist::hwnd(), nw, top, cw - nw, h, 1);
+    sync_lists();
     fit_columns(list);
     place_overlays(nw, cw, ch);
     clamp_scroll();
