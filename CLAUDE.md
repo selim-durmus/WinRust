@@ -47,15 +47,16 @@ powershell -ExecutionPolicy Bypass -File scripts\update-plugin.ps1 <rust-search|
 - Код установки (`src/install/`) ни разу не прогонялся целиком на живой системе: тестируй осторожно, по одному плагину.
 - Новый плагин: crate в `plugins/` + `members` в `Cargo.toml`, строка в `payload.txt`, файл в `src/install/`, запись в `PLUGINS`. Перед изменением системы сохраняй исходные значения, чтобы uninstall их вернул.
 
-## Публикация на GitHub (`Lemxy/WinRust`, ветка `main`)
+## Публикация на GitHub (наш форк `selim-durmus/WinRust`, ветка `main`)
 
-`origin` = `https://github.com/Lemxy/WinRust.git`, аккаунт gh `Lemxy`.
+Это наш собственный проект на форке. `origin` = `https://github.com/selim-durmus/WinRust.git`, аккаунт gh `selim-durmus`: **всё** (коммиты, ветки, теги, релизы) идёт только туда.
+`upstream` = `Lemxy/WinRust`, исходный репозиторий, из которого сделан форк. Он не наш: туда ничего не отправлять (ни push, ни PR, ни релизы, ни issues); пуш в `upstream` выключен (`git remote set-url --push upstream no_push`).
 
-**Автоматика.** Хук `Stop` (`.claude/settings.local.json`, не в git) после каждого ответа запускает `scripts\publish.ps1 -Auto`: есть изменения → коммит и пуш в `main`. Значит, **код должен собираться и проходить тесты к концу каждого ответа**. Скрипт сам отказывается пушить (и снимает индекс), если в изменениях `.exe/.dll/.pdb/.log/.reg/ключи`, `target/`, файлы больше 5 МБ или похожее на токен. Вручную: `scripts\publish.ps1 [-Message "..."]`. CI (`.github/workflows/build.yml`) собирает и тестирует каждый пуш.
+**Как публиковать.** Готовые изменения сразу коммитить и пушить в `main` одним шагом: `scripts\publish.ps1 -Message "..."`. Значит, **код должен собираться и проходить тесты к концу каждого ответа**. Скрипт сам отказывается пушить (и снимает индекс), если `origin` не наш форк, если в изменениях `.exe/.dll/.pdb/.log/.reg/ключи`, `target/`, файлы больше 5 МБ или похожее на токен. CI (`.github/workflows/build.yml`) собирает и тестирует каждый пуш.
 
-**Коммиты (требование владельца).**
-- Никаких `Co-Authored-By` и упоминаний Claude в коммитах, PR и релизах: Claude не должен появляться контрибьютором. Это важнее общих шаблонов атрибуции.
-- Автор: `Lemxy <183076981+Lemxy@users.noreply.github.com>` (уже в git config). Настоящую почту владельца в репозиторий не писать.
+**Коммиты.**
+- Никаких `Co-Authored-By` и упоминаний Claude в коммитах, PR и релизах (как во всей истории форка). Это важнее общих шаблонов атрибуции.
+- Автор: `selim-durmus` с адресом `noreply` GitHub (уже в git config). Настоящую почту владельца в репозиторий не писать.
 - `git push --force`, удаление репозитория/тегов/релизов и смена видимости только по прямой просьбе.
 - Не коммитить `payload\*.exe`, `target\`, логи (они в `.gitignore`).
 
@@ -67,4 +68,4 @@ powershell -ExecutionPolicy Bypass -File scripts\update-plugin.ps1 <rust-search|
 
 **Релиз.** `scripts\release.ps1 v0.2.0 [-Notes "..."]`: `build-all.ps1`, пуш, тег, GitHub Release с `WinRust.exe`. Только когда владелец просит. Перед релизом проверить, что README и ROADMAP не устарели.
 
-**Если пуш не прошёл:** показать ошибку владельцу, не чинить принудительным пушем. Если в `gh auth status` активен не `Lemxy`: `gh auth switch -u Lemxy`.
+**Если пуш не прошёл:** показать ошибку владельцу, не чинить принудительным пушем.

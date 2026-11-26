@@ -131,6 +131,8 @@ struct Gpu {
     icons: HashMap<(i32, i32), Option<ID2D1Bitmap1>>,              // (system icon, image list size)
     pics: HashMap<(PathBuf, i32), ID2D1Bitmap1>,                    // pictures (thumbs.rs), by file and their width
     texts: HashMap<(usize, u8), (i32, String, IDWriteTextLayout)>, // (item, column) -> (width, text, its layout)
+    fade: Option<(ID2D1Bitmap1, Instant, f32)>, // the frame before a change of view, fading out: (it, since, +1 bigger / -1 smaller / 0)
+    glyphs: HashMap<String, (IDWriteTextLayout, f32)>, // single digits and marks of the rolling counts, with their widths
 }
 
 thread_local! { static GPU: RefCell<Option<Gpu>> = const { RefCell::new(None) }; }
@@ -202,7 +204,7 @@ unsafe fn gpu_new(h: HWND) -> windows::core::Result<Gpu> {
             f
         },
         dash: d2f.CreateStrokeStyle(&D2D1_STROKE_STYLE_PROPERTIES1 { dashStyle: D2D1_DASH_STYLE_DASH, miterLimit: 10.0, ..Default::default() }, None)?.cast()?,
-        swap, dc, dw, wic, brush, size: (w0, h0), icons: HashMap::new(), pics: HashMap::new(), texts: HashMap::new(),
+        swap, dc, dw, wic, brush, size: (w0, h0), icons: HashMap::new(), pics: HashMap::new(), texts: HashMap::new(), fade: None, glyphs: HashMap::new(),
     };
     target(&g)?;
     Ok(g)
@@ -229,6 +231,7 @@ unsafe fn resize(g: &mut Gpu, w0: u32, h0: u32) -> windows::core::Result<()> {
     g.swap.ResizeBuffers(0, w0.max(1), h0.max(1), DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0))?;
     g.size = (w0, h0);
     g.texts.clear();
+    g.fade = None; // the old frame no longer fits
     target(g)
 }
 
@@ -295,8 +298,11 @@ struct SelBox {
 struct View {
     top: f32,              // scrolled this far (px), what is on screen
     goal: f32,             // where the glide is going
-    last: Option<Instant>, // the frame before
+    from: f32,             // where it started
+    t0: Option<Instant>,   // when it started (None: not gliding)
     zoom: f32,             // picture size on screen now (logical px), gliding to the zoom step's
+    zfrom: f32,            // the size the zoom glide started from
+    zt0: Option<Instant>,  // when it started
     hover: Option<usize>,
     drag: Drag,
     dir: PathBuf,
@@ -304,7 +310,7 @@ struct View {
     edit_row: usize,
 }
 
-thread_local! { static V: RefCell<View> = RefCell::new(View { top: 0.0, goal: 0.0, last: None, zoom: 0.0, hover: None, drag: Drag::None, dir: PathBuf::new(), edit: 0, edit_row: 0 }); }
+thread_local! { static V: RefCell<View> = RefCell::new(View { top: 0.0, goal: 0.0, from: 0.0, t0: None, zoom: 0.0, zfrom: 0.0, zt0: None, hover: None, drag: Drag::None, dir: PathBuf::new(), edit: 0, edit_row: 0 }); }
 
 pub fn hwnd() -> HWND { SLOT_WND[SLOT_LIST].load(Relaxed) as HWND }
 
@@ -329,16 +335,22 @@ fn rows_n() -> usize { ST.with(|c| c.try_borrow().map_or(0, |s| s.rows.len())) }
 fn client() -> RECT { let mut cr: RECT = unsafe { std::mem::zeroed() }; unsafe { GetClientRect(hwnd(), &mut cr) }; cr }
 
 /// The pictures' size on screen now (physical px).
-fn pic_px() -> i32 { let z = V.with_borrow(|v| v.zoom); (if z > 0.0 { z } else { zoom_target() } * sc(100) as f32 / 100.0).round() as i32 }
+fn pic_px() -> i32 { let z = V.with_borrow(|v| v.zoom); px_of(if z > 0.0 { z } else { zoom_target() }) }
+
+/// Physical px of a picture size `z` (logical px).
+fn px_of(z: f32) -> i32 { (z * sc(100) as f32 / 100.0).round() as i32 }
 
 /// The grid of the List and Icons views: columns, cell size, margins.
 #[derive(Clone, Copy)]
 struct Grid { cols: usize, cw: i32, ch: i32, x0: i32, y0: i32 }
 
-fn grid() -> Grid {
+fn grid() -> Grid { grid_at(pic_px()) }
+
+/// The grid with pictures `px` big (physical px).
+fn grid_at(px: i32) -> Grid {
     let w = client().right;
     let (min_w, ch) = match mode() {
-        Mode::Icons => { let px = pic_px(); ((px + sc(24)).max(sc(92)), px + sc(52)) }
+        Mode::Icons => ((px + sc(24)).max(sc(92)), px + sc(52)),
         _ => (sc(260), row_h()),
     };
     let cols = ((w - sc(12)) / min_w).max(1) as usize;
@@ -392,8 +404,9 @@ fn selected_rows() -> Vec<usize> {
 /// selected item is (the folder you came out of).
 pub fn reset() {
     let dir = ST.with(|c| c.try_borrow().map(|s| s.dir.clone()).unwrap_or_default());
-    let new_dir = V.with_borrow_mut(|v| { let n = v.dir != dir; if n { v.top = 0.0; v.goal = 0.0; v.dir = dir; } n });
+    let new_dir = V.with_borrow_mut(|v| { let n = v.dir != dir; if n { v.top = 0.0; v.goal = 0.0; v.t0 = None; v.dir = dir; } n });
     GPU.with_borrow_mut(|g| if let Some(g) = g { g.texts.clear(); if new_dir { g.pics.clear(); } });
+    if new_dir { COUNTS.with_borrow_mut(|c| c.clear()); }
     clamp();
     if new_dir { if let Some(f) = focused() { show_now(f); } }
     invalidate();
@@ -401,21 +414,32 @@ pub fn reset() {
 
 /// The zoom step changed: pictures glide to the new size (between two picture sizes) or jump (another view).
 pub fn zoom(glide: bool) {
-    if !glide || V.with_borrow(|v| v.zoom) == 0.0 { V.with_borrow_mut(|v| v.zoom = zoom_target()); }
-    GPU.with_borrow_mut(|g| if let Some(g) = g { g.texts.clear() });
+    let target = zoom_target();
+    V.with_borrow_mut(|v| {
+        if !glide || v.zoom == 0.0 { v.zoom = target; v.zt0 = None; } else { v.zfrom = v.zoom; v.zt0 = Some(Instant::now()); }
+    });
+    // the layouts check their width themselves: only another view lays every text out again
+    if !glide { GPU.with_borrow_mut(|g| if let Some(g) = g { g.texts.clear() }); }
     clamp();
     if let Some(f) = focused() { show_now(f); }
-    V.with_borrow_mut(|v| if v.last.is_none() { v.last = Some(Instant::now()); });
     animate(true);
     invalidate();
 }
+
+/// How long a glide takes, from its last push (the wheel, a key, a zoom step) to rest.
+const SCROLL_S: f32 = 0.17;
+const ZOOM_S: f32 = 0.16;
+const FADE_S: f32 = 0.18;
+
+/// Ease out (cubic): fast at first, settling softly, exactly there at 1.
+fn ease(u: f32) -> f32 { let u = u.clamp(0.0, 1.0); 1.0 - (1.0 - u).powi(3) }
 
 /// Highest scroll.
 fn max_top() -> f32 { (content_h() - (client().bottom - head_h())).max(0) as f32 }
 
 fn clamp() {
     let m = max_top();
-    V.with_borrow_mut(|v| { v.goal = v.goal.clamp(0.0, m); v.top = v.top.clamp(0.0, m); });
+    V.with_borrow_mut(|v| { v.goal = v.goal.clamp(0.0, m); v.top = v.top.clamp(0.0, m); v.from = v.from.clamp(0.0, m); });
 }
 
 /// Draws once more (no animation running: right away, through the message queue).
@@ -427,38 +451,49 @@ pub fn invalidate() {
 /// Glide toward `goal`.
 fn scroll_to(goal: f32) {
     let m = max_top(); // before the state is borrowed: the grid reads the zoom from it
-    V.with_borrow_mut(|v| { v.goal = goal.clamp(0.0, m); if v.last.is_none() { v.last = Some(Instant::now()); } });
+    // a new glide from where the list is now: it always ends SCROLL_S after the last push, however far it goes, so
+    // the list never runs on after the wheel has stopped
+    V.with_borrow_mut(|v| { v.goal = goal.clamp(0.0, m); v.from = v.top; v.t0 = Some(Instant::now()); });
     animate(true);
     invalidate();
 }
 
-/// One step of the glides (scroll and picture size); true while still moving.
+/// One step of the glides (scroll, picture size, the fade between views); true while still moving. Each is worked out
+/// from the time it started, not from the frame before: a late frame never slows them down.
 fn step() -> bool {
     let target = zoom_target();
-    let (dt, zoom_moving) = V.with_borrow_mut(|v| {
-        let now = Instant::now();
-        let dt = v.last.map_or(1.0 / 120.0, |l| (now - l).as_secs_f32()).min(0.05);
-        v.last = Some(now);
-        (dt, v.zoom != target && mode() == Mode::Icons)
+    let now = Instant::now();
+    let icons = mode() == Mode::Icons;
+    let z1 = V.with_borrow(|v| match v.zt0 {
+        Some(t0) if icons && v.zoom != target => {
+            let u = (now - t0).as_secs_f32() / ZOOM_S;
+            Some(if u >= 1.0 { target } else { v.zfrom + (target - v.zfrom) * ease(u) })
+        }
+        _ => None,
     });
-    if zoom_moving {
-        // the pictures grow or shrink; the item at the top stays where it is on screen
+    if let Some(z1) = z1 {
+        // the pictures grow or shrink; the item at the top stays where it is on screen. When the number of columns
+        // changes, the items move to other places: the frame before fades into the new one instead of jumping.
+        if grid_at(px_of(z1)).cols != grid().cols { snapshot(0.0); }
         let anchor = item_at_content(sc(8), V.with_borrow(|v| v.top) as i32 + sc(8));
         let before = anchor.map(|i| item_box(i).1 as f32 - V.with_borrow(|v| v.top));
-        V.with_borrow_mut(|v| { let d = target - v.zoom; v.zoom = if d.abs() < 0.5 { target } else { v.zoom + d * (1.0 - (-dt * 20.0).exp()) }; });
+        V.with_borrow_mut(|v| { v.zoom = z1; if z1 == target { v.zt0 = None; } });
         if let (Some(i), Some(off)) = (anchor, before) {
             let t = (item_box(i).1 as f32 - off).clamp(0.0, max_top());
-            V.with_borrow_mut(|v| { v.top = t; v.goal = t; });
+            V.with_borrow_mut(|v| { v.top = t; v.goal = t; v.t0 = None; });
         }
-        GPU.with_borrow_mut(|g| if let Some(g) = g { g.texts.retain(|k, _| k.1 != 9) }); // labels wrap again at the new width
+    } else {
+        V.with_borrow_mut(|v| { v.zoom = target; v.zt0 = None; });
     }
+    let fading = GPU.with_borrow(|g| g.as_ref().is_some_and(|g| g.fade.is_some())) || COUNTING.get();
     V.with_borrow_mut(|v| {
-        let d = v.goal - v.top;
-        let scrolling = d.abs() >= 0.5;
-        if scrolling { v.top += d * (1.0 - (-dt * 18.0).exp()); } else { v.top = v.goal; } // eased: quick, settling softly
-        let moving = scrolling || (v.zoom != target && mode() == Mode::Icons);
-        if !moving { v.last = None; }
-        moving
+        if let Some(t0) = v.t0 {
+            let u = (now - t0).as_secs_f32() / SCROLL_S;
+            if u >= 1.0 { v.top = v.goal; v.t0 = None; } else { v.top = v.from + (v.goal - v.from) * ease(u); }
+        } else {
+            v.top = v.goal;
+        }
+        v.t0.is_some() || v.zt0.is_some() || fading
     })
 }
 
@@ -478,7 +513,7 @@ fn show_now(i: usize) {
     let top = V.with_borrow(|v| v.top);
     if y as f32 >= top && (y + h) as f32 <= top + view { return; }
     let t = (y as f32 - view / 3.0).clamp(0.0, max_top());
-    V.with_borrow_mut(|v| { v.top = t; v.goal = t; });
+    V.with_borrow_mut(|v| { v.top = t; v.goal = t; v.t0 = None; });
 }
 
 /// The item at content point (x, y) (y before scrolling).
@@ -578,11 +613,76 @@ unsafe fn render() {
     let ok = GPU.with_borrow_mut(|g| {
         let g = g.as_mut().unwrap();
         if resize(g, cr.right as u32, cr.bottom as u32).is_err() { return false; }
-        draw(g, cr.right, cr.bottom);
+        compose(g, cr.right, cr.bottom);
         g.swap.Present(0, DXGI_PRESENT(0)).is_ok()
     });
     if !ok { GPU.set(None); invalidate(); } // the device went away (driver update, GPU reset): made again next frame
+    if COUNTING.get() { animate(true); } // counts on their way: the next frames too
     fps_mark("new", V.with_borrow(|v| v.top));
+}
+
+/// Scale `k` around the middle of a `cw` x `ch` frame.
+fn scale_mid(k: f32, cw: i32, ch: i32) -> windows_numerics::Matrix3x2 {
+    windows_numerics::Matrix3x2 { M11: k, M12: 0.0, M21: 0.0, M22: k, M31: cw as f32 / 2.0 * (1.0 - k), M32: ch as f32 / 2.0 * (1.0 - k) }
+}
+
+/// The frame: the list, and while the view changes the frame before over it, fading out. Zooming in, the old frame
+/// grows a little as it goes and the new one grows into place (the other way round zooming out).
+unsafe fn compose(g: &mut Gpu, cw: i32, ch: i32) {
+    let fade = g.fade.as_ref().map(|(b, t0, d)| (b.clone(), ease(t0.elapsed().as_secs_f32() / FADE_S), *d));
+    let Some((old, e, d)) = fade.filter(|f| f.1 < 1.0) else {
+        g.fade = None;
+        draw(g, cw, ch);
+        return;
+    };
+    let dc = g.dc.clone();
+    const GROW: f32 = 0.045;
+    dc.SetTransform(&scale_mid(1.0 - GROW * d * (1.0 - e), cw, ch));
+    draw(g, cw, ch);
+    dc.BeginDraw();
+    dc.SetTransform(&scale_mid(1.0 + GROW * d * e, cw, ch));
+    dc.DrawBitmap(&old, Some(&rf(0.0, 0.0, cw as f32, ch as f32)), 1.0 - e, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+    dc.SetTransform(&windows_numerics::Matrix3x2::identity());
+    let _ = dc.EndDraw(None, None);
+}
+
+/// Keeps what is on screen now, to fade it into what comes next (a change of view: call before the change). `d`: +1
+/// the view grows (Ctrl+wheel up), -1 it shrinks, 0 neither.
+pub fn snapshot(d: f32) {
+    if !active() { return; }
+    let cr = client();
+    unsafe {
+        GPU.with_borrow_mut(|g| {
+            let Some(g) = g.as_mut() else { return };
+            if g.size != (cr.right as u32, cr.bottom as u32) || cr.right <= 0 || cr.bottom <= 0 { return; }
+            let props = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_IGNORE },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
+                ..Default::default()
+            };
+            let Ok(bmp) = g.dc.CreateBitmap(D2D_SIZE_U { width: g.size.0, height: g.size.1 }, None, 0, &props) else { return };
+            // drawn again into a picture of its own (the swap chain's buffers cannot be read back), fade and all
+            g.dc.SetTarget(&bmp);
+            compose(g, cr.right, cr.bottom);
+            if target(g).is_err() { return; }
+            g.fade = Some((bmp, Instant::now(), d));
+        });
+    }
+    animate(true);
+    invalidate();
+}
+
+/// The text layout of `text` for item `key` (item, column), kept while the text and the width stay: made again only
+/// for items scrolled into view or a new width (laying text out is the dearest part of a frame).
+unsafe fn layout(g: &mut Gpu, key: (usize, u8), text: &str, wd: i32, ht: f32, fmt: &IDWriteTextFormat) -> Option<IDWriteTextLayout> {
+    if let Some((w0, t0, l)) = g.texts.get(&key) && *w0 == wd && t0 == text { return Some(l.clone()); }
+    let s16: Vec<u16> = text.encode_utf16().collect();
+    let l = g.dw.CreateTextLayout(&s16, fmt, wd.max(1) as f32, ht).ok()?;
+    if g.texts.len() > 4000 { g.texts.clear(); }
+    g.texts.insert(key, (wd, text.to_string(), l.clone()));
+    Some(l)
 }
 
 /// What an item looks like: its fill (selection, the pointer, a drop, every other row) or None for the plain background.
@@ -598,6 +698,7 @@ fn look(i: usize, on: bool, hot: bool, focus: bool, drop: isize, zebra: bool, bg
 }
 
 unsafe fn draw(g: &mut Gpu, cw: i32, ch: i32) {
+    COUNTING.set(false); // set again by a count still on its way
     let dc = g.dc.clone();
     dc.BeginDraw();
     let bg = ui::listbg();
@@ -657,17 +758,8 @@ unsafe fn draw(g: &mut Gpu, cw: i32, ch: i32) {
                         dc.DrawBitmap(&b, Some(&rf(x.round(), y.round(), (x + dw).round(), (y + dh).round())), 1.0, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None);
                     }
                     if edit_row != Some(*i) {
-                        let wd = bw - sc(12);
-                        let lay = match g.texts.get(&(*i, 9)) {
-                            Some((w1, t0, l)) if *w1 == wd && *t0 == shown => Some(l.clone()),
-                            _ => {
-                                let s16: Vec<u16> = shown.encode_utf16().collect();
-                                let l = g.dw.CreateTextLayout(&s16, &g.f_label, wd as f32, sc(34) as f32).ok();
-                                if let Some(l) = &l { g.texts.insert((*i, 9), (wd, shown.clone(), l.clone())); }
-                                l
-                            }
-                        };
-                        if let Some(l) = lay {
+                        let f = g.f_label.clone();
+                        if let Some(l) = layout(g, (*i, 9), &shown, bw - sc(12), sc(34) as f32, &f) {
                             paint(if on { pal().text } else { mix(pal().dim, pal().text, 0.75) });
                             dc.DrawTextLayout(Vector2 { X: (bx + sc(6)) as f32, Y: (py0 + px + sc(6)) as f32 }, &l, &brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
                         }
@@ -682,8 +774,8 @@ unsafe fn draw(g: &mut Gpu, cw: i32, ch: i32) {
                         dc.DrawBitmap(&b, Some(&rf((bx + sc(8)) as f32, (by + (bh - s) / 2) as f32, (bx + sc(8) + s) as f32, (by + (bh + s) / 2) as f32)), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
                     }
                     if edit_row != Some(*i) {
-                        let s16: Vec<u16> = shown.encode_utf16().collect();
-                        if let Ok(l) = g.dw.CreateTextLayout(&s16, &g.f_name, (bw - sc(44)).max(1) as f32, bh as f32) {
+                        let f = g.f_name.clone();
+                        if let Some(l) = layout(g, (*i, 10), &shown, (bw - sc(44)).max(1), bh as f32, &f) {
                             paint(pal().text);
                             dc.DrawTextLayout(Vector2 { X: (bx + sc(8) + s + sc(8)) as f32, Y: by as f32 }, &l, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
                         }
@@ -760,18 +852,9 @@ unsafe fn draw_rows(g: &mut Gpu, dc: &ID2D1DeviceContext, brush: &ID2D1SolidColo
         let shown = r.name.rsplit('\\').next().unwrap_or(&r.name).to_string();
         let dim = if on { mix(pal().dim, pal().text, 0.45) } else { pal().dim };
         let mut cell = |col: u8, t: &str, l: i32, rgt: i32, c: u32, name: bool| {
-            let wd = (rgt - l).max(1);
             // laid out once and kept while the text and the width stay (counts change while folders are counted)
-            let lay = match g.texts.get(&(*i, col)) {
-                Some((w0, t0, l)) if *w0 == wd && t0 == t => l.clone(),
-                _ => {
-                    let s16: Vec<u16> = t.encode_utf16().collect();
-                    let Ok(l) = g.dw.CreateTextLayout(&s16, if name { &g.f_name } else { &g.f_det }, wd as f32, rh as f32) else { return };
-                    if g.texts.len() > 4000 { g.texts.clear(); }
-                    g.texts.insert((*i, col), (wd, t.to_string(), l.clone()));
-                    l
-                }
-            };
+            let f = if name { g.f_name.clone() } else { g.f_det.clone() };
+            let Some(lay) = layout(g, (*i, col), t, (rgt - l).max(1), rh as f32, &f) else { return };
             paint(c);
             dc.DrawTextLayout(Vector2 { X: l as f32, Y: y as f32 }, &lay, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
         };
@@ -785,12 +868,24 @@ unsafe fn draw_rows(g: &mut Gpu, dc: &ID2D1DeviceContext, brush: &ID2D1SolidColo
         } else { type_text(&r.name, r.dir) };
         cell(2, &kind, x[2] + sc(10), x[3] - sc(8), dim, false);
         if r.dir {
-            if let Some(s) = PREFS.with_borrow(|p| p.folder_sizes).then(|| sizes::get(&dir.join(&r.name))).flatten() {
+            let full = dir.join(&r.name);
+            if let Some(s) = PREFS.with_borrow(|p| p.folder_sizes).then(|| sizes::get(&full)).flatten() {
                 let c = if s.done { dim } else { mix(dim, bg, 0.45) };
-                let n = |k: u32| if k == 0 { "\u{2013}".to_string() } else { thousands(k as usize) };
-                cell(3, &n(s.dirs), x[3] + sc(10), x[4] - sc(8), c, false);
-                cell(4, &n(s.files), x[4] + sc(10), x[5] - sc(8), c, false);
-                cell(5, &size_text(s.bytes), x[5] + sc(10), x[6] - sc(8), c, false);
+                // while a total grows the numbers count up to it, each digit rolling into the next like a meter;
+                // at rest they are plain text again
+                let (now, moving) = tween(&full, [s.dirs as f64, s.files as f64, s.bytes as f64]);
+                if moving {
+                    COUNTING.set(true);
+                    for (j, col) in [(0usize, 3usize), (1, 4), (2, 5)] {
+                        let (v, dec, sep, unit) = if j < 2 { (now[j], 0, true, "") } else { size_unit(now[2]) };
+                        meter(g, dc, brush, v, dec, sep, unit, x[col] + sc(10), y, rh, x[col + 1] - sc(8), c);
+                    }
+                } else {
+                    let n = |k: u32| if k == 0 { "\u{2013}".to_string() } else { thousands(k as usize) };
+                    cell(3, &n(s.dirs), x[3] + sc(10), x[4] - sc(8), c, false);
+                    cell(4, &n(s.files), x[4] + sc(10), x[5] - sc(8), c, false);
+                    cell(5, &size_text(s.bytes), x[5] + sc(10), x[6] - sc(8), c, false);
+                }
             }
         } else {
             let off = mix(dim, bg, 0.5);
@@ -799,6 +894,85 @@ unsafe fn draw_rows(g: &mut Gpu, dc: &ID2D1DeviceContext, brush: &ID2D1SolidColo
             cell(5, &size_text(r.size), x[5] + sc(10), x[6] - sc(8), dim, false);
         }
     }
+}
+
+// ---------- the rolling counts ----------
+
+/// A folder's totals as shown: they follow the real ones, counting up (or down) to them.
+struct Tween { shown: [f64; 3], at: Instant, live: bool }
+
+thread_local! {
+    static COUNTS: RefCell<HashMap<PathBuf, Tween>> = RefCell::new(HashMap::new());
+    static COUNTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; // some count still on its way: frames go on
+}
+
+/// The totals of folder `p` to show this frame on their way to `target` (folders, files, bytes), and whether they are
+/// still moving. Seen for the first time, they show as they are (nothing counts up when a folder opens).
+fn tween(p: &Path, target: [f64; 3]) -> ([f64; 3], bool) {
+    COUNTS.with_borrow_mut(|m| {
+        let now = Instant::now();
+        let t = m.entry(p.to_path_buf()).or_insert(Tween { shown: target, at: now, live: false });
+        if t.shown == target { t.live = false; return (target, false); }
+        // a part of the way each frame, by the time since the frame before (one frame's when it just started)
+        let dt = if t.live { (now - t.at).as_secs_f64().min(0.05) } else { 1.0 / 120.0 };
+        t.at = now;
+        t.live = true;
+        let k = 1.0 - (-dt / 0.14).exp();
+        for j in 0..3 {
+            let d = target[j] - t.shown[j];
+            if d.abs() <= 0.5 + target[j].abs() * 2e-5 { t.shown[j] = target[j]; } else { t.shown[j] += d * k; }
+        }
+        (t.shown, true)
+    })
+}
+
+/// Bytes as the size column shows them: (value in its unit, decimals, thousands marks, unit), like size_text.
+fn size_unit(b: f64) -> (f64, u32, bool, &'static str) {
+    const MB: f64 = (1u64 << 20) as f64;
+    if b < MB { (b / 1024.0, 0, false, " KB") } else if b < MB * 1024.0 { (b / MB, 1, false, " MB") } else { (b / (MB * 1024.0), 2, false, " GB") }
+}
+
+/// One digit or mark of the rolling counts, laid out once: (layout, width).
+unsafe fn glyph(g: &mut Gpu, t: &str, band: f32) -> Option<(IDWriteTextLayout, f32)> {
+    if let Some(v) = g.glyphs.get(t) { return Some(v.clone()); }
+    let s16: Vec<u16> = t.encode_utf16().collect();
+    let l = g.dw.CreateTextLayout(&s16, &g.f_det, sc(200) as f32, band).ok()?;
+    let mut m = DWRITE_TEXT_METRICS::default();
+    l.GetMetrics(&mut m).ok()?;
+    g.glyphs.insert(t.to_string(), (l.clone(), m.widthIncludingTrailingWhitespace));
+    Some((l, m.widthIncludingTrailingWhitespace))
+}
+
+/// Draws `x` like a meter at the left of cell (l .. right) of the row at `y`: each digit rolls up into the next one as
+/// the value passes it (the last digit always turning, the others only while the digits below them go from 9 to 0).
+#[allow(clippy::too_many_arguments)]
+unsafe fn meter(g: &mut Gpu, dc: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, x: f64, dec: u32, sep: bool, unit: &str, l: i32, y: i32, rh: i32, right: i32, c: u32) {
+    const DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+    let band = (sc(12) as f32 * 1.45).ceil();
+    let top = y as f32 + (rh as f32 - band) / 2.0;
+    let n = x.max(0.0) * 10f64.powi(dec as i32);
+    let mut count = dec + 1; // digits drawn: at least one before the point
+    while count < 19 && 10f64.powi(count as i32) <= n.floor() { count += 1; }
+    brush.SetColor(&color(c));
+    dc.PushAxisAlignedClip(&rf(l as f32, top, right as f32, top + band), D2D1_ANTIALIAS_MODE_ALIASED);
+    let mut at = l as f32;
+    let mut put = |g: &mut Gpu, t: &str, dy: f32, adv: bool| {
+        if let Some((lay, w)) = glyph(g, t, band) {
+            dc.DrawTextLayout(Vector2 { X: at, Y: top + dy }, &lay, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+            if adv { at += w; }
+        }
+    };
+    for k in (0..count).rev() {
+        let p = 10f64.powi(k as i32);
+        let d = ((n / p).floor() as u64 % 10) as usize;
+        let roll = if k == 0 { n.fract() } else { ((n % p) - (p - 1.0)).clamp(0.0, 1.0) } as f32;
+        let roll = roll * roll * (3.0 - 2.0 * roll); // eased: each turn settles on its digit
+        if roll > 0.0 { put(g, DIGITS[(d + 1) % 10], (1.0 - roll) * band, false); }
+        put(g, DIGITS[d], -roll * band, true);
+        if dec > 0 && k == dec { put(g, ".", 0.0, true); } else if sep && k > dec && (k - dec).is_multiple_of(3) { put(g, ",", 0.0, true); }
+    }
+    if !unit.is_empty() { put(g, unit, 0.0, true); }
+    dc.PopAxisAlignedClip();
 }
 
 /// The column titles, the sorted one with its arrow.
@@ -991,7 +1165,12 @@ pub unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> L
         WM_SIZE => { clamp(); GPU.with_borrow_mut(|g| if let Some(g) = g { g.texts.clear() }); render(); 0 }
         WM_MOUSEWHEEL => {
             let d = ((wp >> 16) & 0xFFFF) as i16 as i32;
-            if wp & 0x0008 != 0 { PostMessageW(main, ui::WM_UI, 25, d.signum() as isize); return 0; } // Ctrl+wheel: zoom
+            if wp & 0x0008 != 0 {
+                // Ctrl+wheel: zoom, one step per notch (a touchpad's or a fine wheel's small turns add up)
+                let steps = ui::ctrl_wheel_steps(d);
+                if steps != 0 { PostMessageW(main, ui::WM_UI, 25, steps as isize); }
+                return 0;
+            }
             end_rename(true);
             let mut lines = 3u32;
             SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &mut lines as *mut _ as *mut _, 0);
@@ -1094,7 +1273,7 @@ pub unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> L
                     let (_, len) = thumb(client().bottom, 0.0, m);
                     let track = (client().bottom - head_h() - sc(8)) as f32;
                     let t = (t0 + (y - y0) as f32 * m / (track - len).max(1.0)).clamp(0.0, m);
-                    V.with_borrow_mut(|v| { v.top = t; v.goal = t; });
+                    V.with_borrow_mut(|v| { v.top = t; v.goal = t; v.t0 = None; });
                     invalidate();
                 }
                 Some((1, ..)) => {

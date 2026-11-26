@@ -286,6 +286,15 @@ thread_local! {
     static WHEEL: Cell<i32> = const { Cell::new(0) }; // Ctrl+wheel turned less than one notch (touchpads)
 }
 
+/// Ctrl+wheel turned by `delta`: whole zoom steps (+ bigger), the rest kept for the next turn (touchpads and fine wheels
+/// send small turns).
+pub fn ctrl_wheel_steps(delta: i32) -> i32 {
+    let d = WHEEL.get() + delta;
+    let steps = d / 120;
+    WHEEL.set(d - steps * 120);
+    steps
+}
+
 /// "Today, 09:48" / "Yesterday, 21:50" for recent files, the plain date otherwise.
 pub(crate) fn friendly_date(ft: u64) -> String {
     let s = date_text(ft);
@@ -850,9 +859,7 @@ unsafe extern "system" fn list_sub(h: HWND, m: u32, wp: WPARAM, lp: LPARAM, _id:
     // yet stays the quick look
     // Ctrl+wheel: bigger / smaller (one zoom step per notch; a touchpad's small turns add up)
     if m == WM_MOUSEWHEEL && wp & 0x0008 != 0 && !desk() {
-        let d = WHEEL.get() + ((wp >> 16) & 0xFFFF) as i16 as i32;
-        let steps = d / 120;
-        WHEEL.set(d - steps * 120);
+        let steps = ctrl_wheel_steps(((wp >> 16) & 0xFFFF) as i16 as i32);
         if steps != 0 { PostMessageW(GetAncestor(h, GA_ROOT), WM_UI, 25, steps as isize); }
         return 0;
     }
@@ -1561,7 +1568,19 @@ fn pop_y(k: usize, n: usize, top: i32, bottom: i32) -> i32 {
     bottom - 3 * row - (span * (k - 3) as f32 / (n - 1 - 3).max(1) as f32) as i32
 }
 
-thread_local! { static POP_STAYS: Cell<bool> = const { Cell::new(false) }; } // opened by a click: no timeout
+thread_local! {
+    static POP_STAYS: Cell<bool> = const { Cell::new(false) }; // opened by a click: no timeout
+    static POP_DRAG: Cell<Option<(i32, i32, bool)>> = const { Cell::new(None) }; // held: (y at the press, y now, moved)
+}
+
+/// The zoom step nearest to `y` on the slider (client of the slider window).
+fn pop_step_at(h: HWND, y: i32) -> usize {
+    let mut cr: RECT = unsafe { std::mem::zeroed() };
+    unsafe { GetClientRect(h, &mut cr) };
+    let (_, n) = zoom_at();
+    let (top, bottom) = (sc(22), cr.bottom - sc(22));
+    (0..n).min_by_key(|&k| (pop_y(k, n, top, bottom) - y).abs()).unwrap_or(0)
+}
 
 pub fn zoom_pop_hide() {
     POP_STAYS.set(false);
@@ -1604,7 +1623,8 @@ unsafe fn paint_pop(h: HWND) {
     // the track on the right, the knob at the current step
     let tx = cr.right - sc(26);
     fill(dc, rc(tx - sc(3), top, tx + sc(3), bottom), mix(pal().bg, pal().text, 0.12), sc(6));
-    let ky = pop_y(i, n, top, bottom);
+    // held, the knob follows the pointer (the zoom goes to the nearest step meanwhile)
+    let ky = match POP_DRAG.get() { Some((_, y, true)) => y.clamp(top, bottom), _ => pop_y(i, n, top, bottom) };
     fill(dc, rc(tx - sc(3), ky, tx + sc(3), bottom), mix(pal().bg, pal().accent, 0.5), sc(6));
     fill(dc, rc(tx - sc(9), ky - sc(9), tx + sc(9), ky + sc(9)), pal().accent, sc(18));
     let (f, g) = (font(13, 400, ui_face()) as HFONT, font(13, 400, winrust_common::style::icon_face()) as HFONT);
@@ -1638,7 +1658,7 @@ pub unsafe extern "system" fn zoom_pop_proc(h: HWND, m: u32, wp: WPARAM, lp: LPA
         WM_TIMER if wp == 1 => {
             let mut p = POINT { x: 0, y: 0 };
             GetCursorPos(&mut p);
-            if !POP_STAYS.get() && WindowFromPoint(p) != h { zoom_pop_hide(); }
+            if !POP_STAYS.get() && POP_DRAG.get().is_none() && WindowFromPoint(p) != h { zoom_pop_hide(); }
             0
         }
         WM_LBUTTONDOWN => {
@@ -1647,16 +1667,35 @@ pub unsafe extern "system" fn zoom_pop_proc(h: HWND, m: u32, wp: WPARAM, lp: LPA
             GetClientRect(h, &mut cr);
             let (_, n) = zoom_at();
             let (top, bottom) = (sc(22), cr.bottom - sc(22));
-            // the nearest step to the click; a click on a view's name lands on that view
-            let k = (0..n).min_by_key(|&k| (pop_y(k, n, top, bottom) - y).abs()).unwrap_or(0);
+            // the nearest step to the click; a click on a view's name lands on that view. Held and moved, the knob
+            // follows the pointer up and down and the zoom goes along, step by step.
+            let k = pop_step_at(h, y);
             let k = POP_MARKS.iter().find(|(_, mk)| (pop_y(*mk, n, top, bottom) - y).abs() < sc(13)).map_or(k, |(_, mk)| *mk);
-            PostMessageW(GetParent(h), WM_UI, 28, k as isize);
+            SetCapture(h);
+            POP_DRAG.set(Some((y, y, false)));
+            if k != zoom_at().0 { PostMessageW(GetParent(h), WM_UI, 28, k as isize); }
             zoom_pop_show();
             0
         }
+        WM_MOUSEMOVE if POP_DRAG.get().is_some() => {
+            let y = ((lp >> 16) & 0xFFFF) as i16 as i32;
+            let Some((y0, _, moved)) = POP_DRAG.get() else { return 0 };
+            if !moved && (y - y0).abs() < sc(4) { return 0; } // a click, not a drag yet
+            POP_DRAG.set(Some((y0, y, true)));
+            let k = pop_step_at(h, y);
+            if k != zoom_at().0 { PostMessageW(GetParent(h), WM_UI, 28, k as isize); }
+            zoom_pop_show();
+            0
+        }
+        WM_LBUTTONUP | WM_CAPTURECHANGED if POP_DRAG.get().is_some() => {
+            POP_DRAG.set(None);
+            if m == WM_LBUTTONUP { ReleaseCapture(); }
+            zoom_pop_show(); // the knob onto its step
+            0
+        }
         WM_MOUSEWHEEL => {
-            let d = ((wp >> 16) & 0xFFFF) as i16 as i32;
-            if d != 0 { PostMessageW(GetParent(h), WM_UI, 25, d.signum() as isize); }
+            let steps = ctrl_wheel_steps(((wp >> 16) & 0xFFFF) as i16 as i32);
+            if steps != 0 { PostMessageW(GetParent(h), WM_UI, 25, steps as isize); }
             zoom_pop_show();
             0
         }

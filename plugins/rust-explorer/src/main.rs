@@ -999,6 +999,7 @@ thread_local! {
     static SHOWN: Cell<f32> = const { Cell::new(0.0) }; // picture size on screen now (logical px), gliding to the step's
 }
 const ZOOM_TIMER: usize = 9;
+const PREFS_TIMER: usize = 12; // the zoom step, saved a moment after the last change
 
 /// Name of the view at the current zoom, for the status line: Details, Tree, List, M / L / XL Icons.
 pub fn view_name() -> &'static str {
@@ -1017,6 +1018,10 @@ pub fn view_name() -> &'static str {
 fn set_zoom(h: HWND, i: usize, refresh: bool) {
     let i = i.min(ZOOM.len() - 1);
     let (view, size) = ZOOM[i];
+    // another view: what is on screen now fades into it (growing zooming in, shrinking zooming out)
+    if refresh && ST.with_borrow(|st| st.view) != view && glist::active() {
+        glist::snapshot(if i > ZOOM_AT.get() { 1.0 } else { -1.0 });
+    }
     ZOOM_AT.set(i);
     if view == View::Icons { ZOOM_LAST_ICONS.set(i); }
     let (list, was) = ST.with_borrow(|st| (st.list, st.view));
@@ -1043,7 +1048,7 @@ fn set_zoom(h: HWND, i: usize, refresh: bool) {
     }
     if refresh {
         PREFS.with_borrow_mut(|p| p.zoom = i);
-        prefs::save(&prefs_now());
+        unsafe { SetTimer(h, PREFS_TIMER, 600, None) }; // saved once the wheel rests, not at every notch
         unsafe { ui::status_dirty(h) };
         ui::zoom_pop_show(); // the slider shows where the zoom is, like File Pilot's
     }
@@ -2400,6 +2405,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
             }
             desk::SPAWN_WORKERW if desk() => { desk::spawn_workerw(h); 0 }
             WM_TIMER if !desk() && wp == ZOOM_TIMER => { zoom_tick(h); 0 }
+            WM_TIMER if !desk() && wp == PREFS_TIMER => { KillTimer(h, PREFS_TIMER); prefs::save(&prefs_now()); 0 }
             WM_TIMER if desk() && wp == 7 => { desk::check_live(ST.with_borrow(|st| st.list)); 0 }
             WM_DESTROY => { PostQuitMessage(0); 0 }
             _ => DefWindowProcW(h, m, wp, lp),
@@ -2408,7 +2414,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
 }
 
 fn main() {
-    // a panic ends the window (it happens inside a window procedure); what it was is kept in %TEMP%x-panic.log
+    // a panic ends the window (it happens inside a window procedure); what it was is kept in %TEMP%\rx-panic.log
     std::panic::set_hook(Box::new(|info| {
         use std::io::Write;
         if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(env::temp_dir().join("rx-panic.log")) {
@@ -2454,12 +2460,31 @@ fn main() {
             // measure the frame again now that WM_NCCALCSIZE takes the title bar away
             SetWindowPos(main, ptr::null_mut(), 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
-        let mut msg = std::mem::zeroed();
+        let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, 0 as _, 0, 0) > 0 {
+            // a frame of an animation: the input waiting first. Posted messages come before input, so with a frame
+            // posted at every screen refresh the wheel's notches waited behind them and the list went on scrolling
+            // after the wheel had stopped; now each frame draws with every notch turned so far.
+            if msg.message == glist::WM_FRAME {
+                let mut inp: MSG = std::mem::zeroed();
+                for _ in 0..64 {
+                    if PeekMessageW(&mut inp, 0 as _, 0, 0, PM_REMOVE | PM_QS_INPUT) == 0 { break; }
+                    pump(&inp);
+                }
+            }
+            pump(&msg);
+        }
+    }
+}
+
+/// One message of the loop (see main).
+unsafe fn pump(msg: &MSG) {
+    unsafe {
+        {
             // Alt+Left / Right / Up / Enter arrive as WM_SYSKEYDOWN at the list, which never reports them: handle them here
             if msg.message == WM_SYSKEYDOWN && !desk() {
                 let act = match msg.wParam { 0x25 => 1, 0x27 => 2, 0x0D => 3, 0x26 => 4, _ => 0 };
-                if act != 0 { PostMessageW(GetAncestor(msg.hwnd, GA_ROOT), WM_NAV, act, 0); continue; }
+                if act != 0 { PostMessageW(GetAncestor(msg.hwnd, GA_ROOT), WM_NAV, act, 0); return; }
             }
             // a click anywhere else lets go of the address box (the side pane and the toolbar never take the focus
             // themselves, so it used to stay there); a click on the box itself puts it back right after
@@ -2475,10 +2500,10 @@ fn main() {
                     let act = match (msg.wParam >> 16) & 0xFFFF { 1 => 1, 2 => 2, _ => 0 }; // XBUTTON1 = back, XBUTTON2 = forward
                     if act != 0 { PostMessageW(GetAncestor(msg.hwnd, GA_ROOT), WM_NAV, act, 0); }
                 }
-                continue;
+                return;
             }
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+            TranslateMessage(msg);
+            DispatchMessageW(msg);
         }
     }
 }
