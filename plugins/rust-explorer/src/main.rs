@@ -798,6 +798,7 @@ unsafe fn nav_menu(h: HWND, i: usize) {
 
 /// The folder row under screen point (x, y) in the list: (row, its path). None over files, the empty rows, or outside.
 pub fn folder_row_at(x: i32, y: i32) -> Option<(usize, PathBuf)> {
+    if glist::active() { return glist::folder_at(x, y); }
     let list = ST.with(|c| c.try_borrow().map(|s| s.list).unwrap_or(ptr::null_mut()));
     let mut p = POINT { x, y };
     unsafe { windows_sys::Win32::Graphics::Gdi::ScreenToClient(list, &mut p) };
@@ -856,6 +857,15 @@ fn copy_paths(h: HWND, paths: &[PathBuf]) {
     let _ = sh::clip_text(h as _, &text);
 }
 
+/// Renames row `i` to `new` (either list's rename box): next to the old name (a subfolder hit is renamed in its own
+/// folder), noted for Ctrl+Z, the folder listed again once the box is gone. Separators are refused, so a rename can
+/// never move the item.
+fn rename_row(h: HWND, i: usize, new: &str) {
+    if new.is_empty() || new.contains(['\\', '/', ':']) { return; }
+    ST.with_borrow(|st| if let Some(r) = st.rows.get(i) { let old = st.dir.join(&r.name); let to = old.with_file_name(new); if old != to && fs::rename(&old, &to).is_ok() { sh::push_undo(sh::Undo::Renamed(to, old)); } });
+    unsafe { PostMessageW(h, WM_APP, 0, 0) };
+}
+
 /// Starts renaming the focused row in the list (F2, or "Rename" from the menu).
 fn rename_selected() {
     let list = ST.with_borrow(|st| st.list);
@@ -865,6 +875,7 @@ fn rename_selected() {
 
 /// Opens row `i`'s name for typing; for a file only the part before the extension is selected, as in Explorer.
 fn edit_label(list: HWND, i: usize) {
+    if glist::active() { unsafe { glist::begin_rename(i) }; return; }
     let e = put(list, LVM_EDITLABELW, i, 0) as HWND;
     if e.is_null() || ST.with_borrow(|st| st.rows.get(i).is_none_or(|r| r.dir)) { return; }
     let mut buf = [0u16; 512];
@@ -2046,6 +2057,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                 }
                 0
             }
+            WM_CTLCOLOREDIT if glist::edit_colors(wp as _, lp as _).is_some() => glist::edit_colors(wp as _, lp as _).unwrap(), // the rename box
             WM_ACTIVATEAPP if wp == 0 => { ui::zoom_pop_hide(); DefWindowProcW(h, m, wp, lp) } // another app came forward
             WM_SIZE => {
                 let list = ST.with_borrow(|st| st.list);
@@ -2188,6 +2200,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                 match nm.code {
                     NM_CUSTOMDRAW if nm.hwndFrom == list && !desk() => return ui::list_draw(lp), // the rows are painted by hand
                     LVN_ITEMCHANGED | LVN_ODSTATECHANGED => {
+                        glist::invalidate();
                         // the empty rows at the end are only room: a selection that reaches them goes back to the last row
                         let n = ST.with_borrow(|st| st.rows.len());
                         let (from, to) = if nm.code == LVN_ITEMCHANGED { let i = (*(lp as *const NMLISTVIEW)).iItem; (i, i) } else { let o = &*(lp as *const NMLVODSTATECHANGE); (o.iFrom, o.iTo) };
@@ -2337,15 +2350,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                     }
                     LVN_ENDLABELEDITW => {
                         let it = &(*(lp as *const NMLVDISPINFOW)).item;
-                        if !it.pszText.is_null() {
-                            let new = wstr(it.pszText);
-                            // reject separators so a rename can never move the item
-                            if !new.is_empty() && !new.contains(['\\', '/', ':']) {
-                                // next to the old name: a subfolder hit is renamed in its own folder
-                                ST.with_borrow(|st| if let Some(r) = usize::try_from(it.iItem).ok().and_then(|i| st.rows.get(i)) { let old = st.dir.join(&r.name); let to = old.with_file_name(&new); if old != to && fs::rename(&old, &to).is_ok() { sh::push_undo(sh::Undo::Renamed(to, old)); } });
-                                PostMessageW(h, WM_APP, 0, 0); // reload after the edit control is gone
-                            }
-                        }
+                        if !it.pszText.is_null() { if let Ok(i) = usize::try_from(it.iItem) { rename_row(h, i, &wstr(it.pszText)); } }
                     }
                     _ => {}
                 }

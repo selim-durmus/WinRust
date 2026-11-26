@@ -302,10 +302,13 @@ pub(crate) fn friendly_date(ft: u64) -> String {
 
 thread_local! { static DROPROW: Cell<isize> = const { Cell::new(-1) }; }
 
+pub fn drop_row() -> isize { DROPROW.get() }
+
 /// The folder row a drag is over (-1 none): drawn lit, so you see it would go in there.
 pub fn set_drop_row(i: isize) {
     let old = DROPROW.replace(i);
     if old == i { return; }
+    crate::glist::invalidate();
     let list = ST.with(|c| c.try_borrow().map(|s| s.list).unwrap_or(ptr::null_mut()));
     unsafe { redraw_row(list, old); redraw_row(list, i); UpdateWindow(list); }
 }
@@ -833,6 +836,7 @@ unsafe extern "system" fn label_edit_sub(h: HWND, m: u32, wp: WPARAM, lp: LPARAM
 /// Column header, drawn by hand: bar colour, white / dim title, a sort arrow on the sorted column. The header reports its
 /// custom draw to its parent, the list, so the hook sits on the list.
 unsafe extern "system" fn list_sub(h: HWND, m: u32, wp: WPARAM, lp: LPARAM, _id: usize, _data: usize) -> LRESULT {
+    if m == WM_SETFOCUS && crate::glist::active() { SetFocus(crate::glist::hwnd()); return 0; }
     if m == WM_CTLCOLOREDIT && !desk() {
         // the rename box: the list's text on a lighter shade of its background
         let dc = wp as HDC;
