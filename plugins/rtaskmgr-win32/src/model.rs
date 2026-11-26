@@ -18,16 +18,16 @@ pub enum Page {
 
 /// Пункты боковой панели: страница, символ значка, подпись.
 pub static NAV: std::sync::LazyLock<[(Page, char, &'static str); 10]> = std::sync::LazyLock::new(|| [
-    (Page::Processes, '\u{E9D9}', t!("Процессы", "Processes")),
-    (Page::Performance, '\u{E9D2}', t!("Производительность", "Performance")),
-    (Page::History, '\u{E81C}', t!("Журнал приложений", "App history")),
-    (Page::Startup, '\u{EC4A}', t!("Автозагрузка", "Startup")),
-    (Page::Users, '\u{E77B}', t!("Пользователи", "Users")),
-    (Page::Details, '\u{EA37}', t!("Подробности", "Details")),
-    (Page::Services, '\u{E9F5}', t!("Службы", "Services")),
-    (Page::Insights, '\u{E946}', t!("Что тормозит", "What's slow")),
-    (Page::Rules, '\u{E7BA}', t!("Правила", "Rules")),
-    (Page::Settings, '\u{E713}', t!("Параметры", "Settings")),
+    (Page::Processes, '\u{E9D9}', "Processes"),
+    (Page::Performance, '\u{E9D2}', "Performance"),
+    (Page::History, '\u{E81C}', "App history"),
+    (Page::Startup, '\u{EC4A}', "Startup"),
+    (Page::Users, '\u{E77B}', "Users"),
+    (Page::Details, '\u{EA37}', "Details"),
+    (Page::Services, '\u{E9F5}', "Services"),
+    (Page::Insights, '\u{E946}', "What's slow"),
+    (Page::Rules, '\u{E7BA}', "Rules"),
+    (Page::Settings, '\u{E713}', "Settings"),
 ]);
 
 pub fn page_title(p: Page) -> &'static str {
@@ -69,29 +69,29 @@ pub fn columns(p: Page) -> Vec<Col> {
     use Metric::*;
     match p {
         Page::Processes => vec![
-            col(t!("Имя", "Name"), 270.0, Left),
-            col(t!("Состояние", "Status"), 112.0, Left),
-            mcol(t!("ЦП", "CPU"), Cpu),
-            mcol(t!("Память", "Memory"), Mem),
-            mcol(t!("Диск", "Disk"), Disk),
-            mcol(t!("Сеть", "Network"), Net),
+            col("Name", 270.0, Left),
+            col("Status", 112.0, Left),
+            mcol("CPU", Cpu),
+            mcol("Memory", Mem),
+            mcol("Disk", Disk),
+            mcol("Network", Net),
             mcol("GPU", Gpu),
-            col(t!("Подозрительное", "Suspicious"), 140.0, Left),
+            col("Suspicious", 140.0, Left),
         ],
         Page::Users => vec![
-            col(t!("Пользователь", "User"), 270.0, Left),
-            col(t!("Процессов", "Processes"), 112.0, Right),
-            mcol(t!("ЦП", "CPU"), Cpu),
-            mcol(t!("Память", "Memory"), Mem),
-            mcol(t!("Диск", "Disk"), Disk),
-            mcol(t!("Сеть", "Network"), Net),
+            col("User", 270.0, Left),
+            col("Processes", 112.0, Right),
+            mcol("CPU", Cpu),
+            mcol("Memory", Mem),
+            mcol("Disk", Disk),
+            mcol("Network", Net),
             mcol("GPU", Gpu),
         ],
-        Page::Details => vec![col(t!("Имя", "Name"), 220.0, Left), col("PID", 70.0, Right), col(t!("Состояние", "Status"), 100.0, Left), col(t!("ЦП", "CPU"), 70.0, Right), col(t!("Память", "Memory"), 110.0, Right), col(t!("Диск", "Disk"), 100.0, Right), col(t!("Командная строка", "Command line"), 0.0, Left)],
-        Page::Services => vec![col(t!("Имя", "Name"), 200.0, Left), col("PID", 70.0, Right), col(t!("Описание", "Description"), 360.0, Left), col(t!("Состояние", "Status"), 110.0, Left)],
-        Page::Startup => vec![col(t!("Имя", "Name"), 240.0, Left), col(t!("Издатель", "Publisher"), 200.0, Left), col(t!("Состояние", "Status"), 110.0, Left), col(t!("Команда", "Command"), 0.0, Left)],
-        Page::History => vec![col(t!("Время", "Time"), 150.0, Left), col(t!("ЦП %", "CPU %"), 80.0, Right), col(t!("Память %", "Memory %"), 90.0, Right), col(t!("Ввод-вывод КБ/с", "I/O KB/s"), 130.0, Right), col(t!("Сеть КБ/с", "Network KB/s"), 110.0, Right), col(t!("Основной потребитель", "Top consumer"), 0.0, Left)],
-        Page::Rules => vec![col(t!("Процесс", "Process"), 220.0, Left), col(t!("Условие", "Condition"), 280.0, Left), col(t!("Действие", "Action"), 200.0, Left), col(t!("Сработало, раз", "Times triggered"), 130.0, Right)],
+        Page::Details => vec![col("Name", 220.0, Left), col("PID", 70.0, Right), col("Status", 100.0, Left), col("CPU", 70.0, Right), col("Memory", 110.0, Right), col("Disk", 100.0, Right), col("Command line", 0.0, Left)],
+        Page::Services => vec![col("Name", 200.0, Left), col("PID", 70.0, Right), col("Description", 360.0, Left), col("Status", 110.0, Left)],
+        Page::Startup => vec![col("Name", 240.0, Left), col("Publisher", 200.0, Left), col("Status", 110.0, Left), col("Command", 0.0, Left)],
+        Page::History => vec![col("Time", 150.0, Left), col("CPU %", 80.0, Right), col("Memory %", 90.0, Right), col("I/O KB/s", 130.0, Right), col("Network KB/s", 110.0, Right), col("Top consumer", 0.0, Left)],
+        Page::Rules => vec![col("Process", 220.0, Left), col("Condition", 280.0, Left), col("Action", 200.0, Left), col("Times triggered", 130.0, Right)],
         _ => vec![],
     }
 }
@@ -123,8 +123,7 @@ pub struct Row {
 }
 
 pub fn dec(v: f64, digits: usize) -> String {
-    let s = format!("{:.*}", digits, v);
-    if en!() { s } else { s.replace('.', ",") }
+    format!("{:.*}", digits, v)
 }
 
 pub fn fmt_cpu(v: f32) -> String {
@@ -133,12 +132,12 @@ pub fn fmt_cpu(v: f32) -> String {
 
 pub fn fmt_mem_ru(b: u64) -> String {
     let mb = b as f64 / 1_048_576.0;
-    if mb >= 1000.0 { tf!("{} МБ", "{} MB", { let g = group_thousands(mb as u64); if en!() { g } else { g.replace(',', " ") } }) } else if mb >= 100.0 { tf!("{} МБ", "{} MB", dec(mb, 0)) } else { tf!("{} МБ", "{} MB", dec(mb, 1)) }
+    if mb >= 1000.0 { format!("{} MB", group_thousands(mb as u64)) } else if mb >= 100.0 { format!("{} MB", dec(mb, 0)) } else { format!("{} MB", dec(mb, 1)) }
 }
 
 pub fn fmt_disk_ru(bps: f64) -> String {
     let mb = bps / 1_048_576.0;
-    if mb < 0.05 { t!("0 МБ/с", "0 MB/s").into() } else { tf!("{} МБ/с", "{} MB/s", dec(mb, 1)) }
+    if mb < 0.05 { "0 MB/s".into() } else { format!("{} MB/s", dec(mb, 1)) }
 }
 
 pub fn fmt_net_ru(bps: f64, known: bool) -> String {
@@ -146,7 +145,7 @@ pub fn fmt_net_ru(bps: f64, known: bool) -> String {
         return "—".into();
     }
     let mbit = bps * 8.0 / 1e6;
-    if mbit < 0.05 { t!("0 Мбит/с", "0 Mbps").into() } else { tf!("{} Мбит/с", "{} Mbps", dec(mbit, 1)) }
+    if mbit < 0.05 { "0 Mbps".into() } else { format!("{} Mbps", dec(mbit, 1)) }
 }
 
 /// Описание/имя для отображения: описание файла, если известно, иначе имя без «.exe».
@@ -166,7 +165,7 @@ fn svc_display(d: &Data, pid: u32) -> Option<String> {
 fn child_name(d: &Data, p: &Proc) -> String {
     if p.name.eq_ignore_ascii_case("svchost.exe")
         && let Some(s) = svc_display(d, p.pid) {
-            return tf!("Узел службы: {s}", "Service host: {s}");
+            return format!("Service host: {s}");
         }
     if let Some(t) = &p.title {
         return t.clone();
@@ -189,13 +188,13 @@ fn tip_for(procs: &[&Proc], group: bool) -> String {
     }
     by_text.sort_by_key(|e| std::cmp::Reverse(e.0));
     let total = by_text.len();
-    let mut s = String::from(t!("Почему помечено:", "Why flagged:"));
+    let mut s = String::from("Why flagged:");
     for (sev, t, pids) in by_text.into_iter().take(6) {
-        let who = if pids.len() > 1 { tf!(" (процессов: {})", " (processes: {})", pids.len()) } else if group && procs.len() > 1 { format!(" [PID {}]", pids[0]) } else { String::new() };
+        let who = if pids.len() > 1 { format!(" (processes: {})", pids.len()) } else if group && procs.len() > 1 { format!(" [PID {}]", pids[0]) } else { String::new() };
         s += &format!("\n{} — {t}{who}", suspect::sev_word(sev));
     }
     if total > 6 {
-        s += &tf!("\n… и ещё причин: {}", "\n… and {} more reasons", total - 6);
+        s += &format!("\n… and {} more reasons", total - 6);
     }
     s
 }
@@ -208,9 +207,9 @@ fn proc_row(d: &Data, key: String, depth: u8, name: String, members: &[&Proc], e
     let gpu: f32 = members.iter().map(|p| p.gpu).fold(0.0, f32::max);
     let sev = members.iter().flat_map(|p| p.reasons.iter()).map(|r| r.sev).max().unwrap_or(0);
     let status = if members.iter().all(|p| d.suspended.contains(&p.pid)) {
-        t!("Приостановлен", "Suspended")
+        "Suspended"
     } else if members.iter().all(|p| d.efficiency.contains(&p.pid)) {
-        t!("Эффективность", "Efficiency")
+        "Efficiency"
     } else {
         ""
     };
@@ -261,7 +260,7 @@ pub fn build_rows(d: &Data, c: &BuildCtx) -> Vec<Row> {
                 }
                 members.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
                 let multi = members.len() > 1;
-                let base = if members[0].name.eq_ignore_ascii_case("svchost.exe") { t!("Узел службы", "Service host").to_string() } else { friendly(d, members[0]) };
+                let base = if members[0].name.eq_ignore_ascii_case("svchost.exe") { "Service host".to_string() } else { friendly(d, members[0]) };
                 let name = if multi { format!("{base} ({})", members.len()) } else if members[0].name.eq_ignore_ascii_case("svchost.exe") { child_name(d, members[0]) } else { members[0].title.clone().filter(|_| false).unwrap_or(base) };
                 let expanded = multi && c.expanded.contains(&key);
                 let head = proc_row(d, key.clone(), 0, name, &members, multi, expanded);
@@ -306,7 +305,7 @@ pub fn build_rows(d: &Data, c: &BuildCtx) -> Vec<Row> {
             .map(|p| Row {
                 key: p.pid.to_string(),
                 icon_path: p.exe.clone(),
-                cells: vec![p.name.clone(), p.pid.to_string(), (if d.suspended.contains(&p.pid) { t!("Приостановлен", "Suspended") } else { t!("Выполняется", "Running") }).into(), fmt_cpu(p.cpu), fmt_mem_ru(p.mem), fmt_disk_ru(p.disk), process_cmd(d, p.pid)],
+                cells: vec![p.name.clone(), p.pid.to_string(), (if d.suspended.contains(&p.pid) { "Suspended" } else { "Running" }).into(), fmt_cpu(p.cpu), fmt_mem_ru(p.mem), fmt_disk_ru(p.disk), process_cmd(d, p.pid)],
                 sortv: vec![f64::NAN, p.pid as f64, f64::NAN, p.cpu as f64, p.mem as f64, p.disk, f64::NAN],
                 pids: vec![p.pid],
                 heat: vec![None; 7],
@@ -319,7 +318,7 @@ pub fn build_rows(d: &Data, c: &BuildCtx) -> Vec<Row> {
             .filter(|s| q.is_empty() || s.name.to_lowercase().contains(&q) || s.display.to_lowercase().contains(&q))
             .map(|s| Row {
                 key: s.name.clone(),
-                cells: vec![s.name.clone(), if s.pid != 0 { s.pid.to_string() } else { String::new() }, s.display.clone(), (if s.running { t!("Выполняется", "Running") } else { t!("Остановлена", "Stopped") }).into()],
+                cells: vec![s.name.clone(), if s.pid != 0 { s.pid.to_string() } else { String::new() }, s.display.clone(), (if s.running { "Running" } else { "Stopped" }).into()],
                 sortv: vec![f64::NAN, s.pid as f64, f64::NAN, f64::NAN],
                 pids: vec![s.pid],
                 heat: vec![None; 4],
@@ -337,10 +336,10 @@ pub fn build_rows(d: &Data, c: &BuildCtx) -> Vec<Row> {
                 Row {
                     key: s.key(),
                     icon_path: exe,
-                    cells: vec![s.name.clone(), company, (if s.enabled { t!("Включено", "Enabled") } else { t!("Отключено", "Disabled") }).into(), s.command.clone()],
+                    cells: vec![s.name.clone(), company, (if s.enabled { "Enabled" } else { "Disabled" }).into(), s.command.clone()],
                     sortv: vec![f64::NAN; 4],
                     heat: vec![None; 4],
-                    tip: tf!("Источник: {}.{}", "Source: {}.{}", s.source_label(), if s.needs_admin() && !d.is_admin { t!(" Для изменения нужны права администратора.", " Administrator rights are needed to change it.") } else { "" }),
+                    tip: format!("Source: {}.{}", s.source_label(), if s.needs_admin() && !d.is_admin { " Administrator rights are needed to change it." } else { "" }),
                     ..Default::default()
                 }
             })
@@ -364,9 +363,9 @@ pub fn build_rows(d: &Data, c: &BuildCtx) -> Vec<Row> {
             .map(|(i, r)| Row {
                 key: i.to_string(),
                 cells: vec![
-                    if r.proc == "*" { t!("любой", "any").into() } else { r.proc.clone() },
-                    tf!("ЦП > {:.0}% дольше {} с", "CPU > {:.0}% for over {} s", r.cpu, r.secs),
-                    (if r.act == crate::store::RuleAct::Lower { t!("Понизить приоритет", "Lower priority") } else { t!("Уведомить", "Notify") }).into(),
+                    if r.proc == "*" { "any".into() } else { r.proc.clone() },
+                    format!("CPU > {:.0}% for over {} s", r.cpu, r.secs),
+                    (if r.act == crate::store::RuleAct::Lower { "Lower priority" } else { "Notify" }).into(),
                     r.hits.to_string(),
                 ],
                 sortv: vec![f64::NAN, f64::NAN, f64::NAN, r.hits as f64],
@@ -433,12 +432,12 @@ mod tests {
     }
 
     #[test]
-    fn number_formats_use_comma() {
-        assert_eq!(fmt_cpu(2.04), "2,0%");
+    fn number_formats() {
+        assert_eq!(fmt_cpu(2.04), "2.0%");
         assert_eq!(fmt_cpu(0.01), "0%");
-        assert_eq!(fmt_mem_ru(3_746_000_000), "3 572 МБ");
-        assert_eq!(fmt_mem_ru(73 * 1_048_576 + 100_000), "73,1 МБ");
-        assert_eq!(fmt_disk_ru(0.0), "0 МБ/с");
+        assert_eq!(fmt_mem_ru(3_746_000_000), "3,572 MB");
+        assert_eq!(fmt_mem_ru(73 * 1_048_576 + 100_000), "73.1 MB");
+        assert_eq!(fmt_disk_ru(0.0), "0 MB/s");
         assert_eq!(fmt_net_ru(1.0, false), "—");
     }
 
@@ -453,12 +452,12 @@ mod tests {
     fn users_page_groups_processes_by_account() {
         let mut d = Data::new(crate::store::Settings::default());
         d.refresh();
-        let me = d.procs.iter().find(|p| p.pid == std::process::id()).expect("свой процесс").user.clone();
-        assert!(!me.is_empty() && me != "СИСТЕМА", "свой токен должен читаться: {me}");
+        let me = d.procs.iter().find(|p| p.pid == std::process::id()).expect("our own process").user.clone();
+        assert!(!me.is_empty() && me != "SYSTEM", "our own token must be readable: {me}");
         let mut exp = HashSet::new();
         let rows = build_rows(&d, &BuildCtx { page: Page::Users, search: "", expanded: &exp, sort: default_sort(Page::Users) });
         assert!(rows.iter().all(|r| r.depth == 0 && r.expandable));
-        let mine = rows.iter().find(|r| r.cells[0] == me).expect("строка текущего пользователя");
+        let mine = rows.iter().find(|r| r.cells[0] == me).expect("the current user's row");
         assert!(mine.pids.contains(&std::process::id()));
         exp.insert(mine.key.clone());
         let rows2 = build_rows(&d, &BuildCtx { page: Page::Users, search: "", expanded: &exp, sort: default_sort(Page::Users) });
@@ -473,7 +472,7 @@ mod tests {
         let ctx = BuildCtx { page: Page::Processes, search: "", expanded: &exp, sort: default_sort(Page::Processes) };
         let rows = build_rows(&d, &ctx);
         assert!(!rows.is_empty() && rows.iter().all(|r| r.depth == 0));
-        let multi = rows.iter().find(|r| r.expandable).expect("есть группа из нескольких процессов");
+        let multi = rows.iter().find(|r| r.expandable).expect("a group of several processes");
         let mut exp2 = HashSet::new();
         exp2.insert(multi.key.clone());
         let ctx2 = BuildCtx { page: Page::Processes, search: "", expanded: &exp2, sort: default_sort(Page::Processes) };

@@ -50,7 +50,7 @@ pub(crate) fn cli(args: &[String]) -> i32 {
             idx.dedup();
             if !yes {
                 for &i in &idx {
-                    say(&format!("{}: {}", PLUGINS[i].name, PLUGINS[i].warn.get()));
+                    say(&format!("{}: {}", PLUGINS[i].name, PLUGINS[i].warn));
                 }
                 return { say("Nothing changed. Repeat with --yes to install."); 2 };
             }

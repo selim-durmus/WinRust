@@ -20,6 +20,7 @@ const ROWS: [(&str, &str, Get, Set); 7] = [
     ("Folder sizes", "Count what is inside each folder: size, folders and files", |p| p.folder_sizes, |p, v| p.folder_sizes = v),
 ];
 const CLEAR: usize = ROWS.len(); // the "Clear recent places" button
+const UNHIDE: usize = ROWS.len() + 1; // "Show hidden menu items" (those hidden with Delete in a menu)
 
 const PAD: i32 = 20;
 const HEAD: i32 = 64;
@@ -34,10 +35,21 @@ thread_local! {
 
 fn height() -> i32 { sc(HEAD) + sc(ROW) * (ROWS.len() as i32 + 1) + sc(PAD) * 2 + sc(24) }
 
-/// Row of a switch (or CLEAR) at client point y.
-fn row_at(y: i32) -> Option<usize> {
+/// The buttons under the switches (UNHIDE only while some menu items are hidden).
+fn button(i: usize) -> Option<RECT> {
+    let (l, y) = (sc(PAD), sc(HEAD) + sc(ROW) * ROWS.len() as i32 + sc(14));
+    match i {
+        CLEAR => Some(rc(l, y, l + sc(190), y + sc(34))),
+        UNHIDE => (!crate::menu::user_hidden().is_empty()).then(|| rc(l + sc(200), y, l + sc(200) + sc(250), y + sc(34))),
+        _ => None,
+    }
+}
+
+/// The switch row or button at client point (x, y): a button only reacts inside itself.
+fn row_at(x: i32, y: i32) -> Option<usize> {
     let i = (y - sc(HEAD)).div_euclid(sc(ROW));
-    (y >= sc(HEAD) && i >= 0 && i as usize <= CLEAR).then_some(i as usize)
+    if y >= sc(HEAD) && (i as usize) < ROWS.len() { return Some(i as usize); }
+    [CLEAR, UNHIDE].into_iter().find(|&b| button(b).is_some_and(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom))
 }
 
 /// Opens the page over `owner` (or brings it forward when it is already open).
@@ -101,12 +113,14 @@ unsafe fn paint(h: HWND) {
         let kx = if on { tr.right - sc(3) - k } else { tr.left + sc(3) };
         fill(dc, rc(kx, tr.top + sc(3), kx + k, tr.top + sc(3) + k), 0x00FF_FFFF, k);
     }
-    // the button under the card
-    let y = card.bottom + sc(14);
-    let b = rc(l, y, l + sc(190), y + sc(34));
-    fill(dc, b, if hot == CLEAR as i32 { mix(pal().bg, pal().text, 0.14) } else { mix(pal().bg, pal().text, 0.08) }, sc(10));
+    // the buttons under the card
     SelectObject(dc, f_txt);
-    text(dc, "Clear recent places", b, pal().text, DT_CENTER);
+    let n = crate::menu::user_hidden().len();
+    for (i, label) in [(CLEAR, "Clear recent places".to_string()), (UNHIDE, format!("Show hidden menu items ({n})"))] {
+        let Some(b) = button(i) else { continue };
+        fill(dc, b, if hot == i as i32 { mix(pal().bg, pal().text, 0.14) } else { mix(pal().bg, pal().text, 0.08) }, sc(10));
+        text(dc, &label, b, pal().text, DT_CENTER);
+    }
     BitBlt(wdc, 0, 0, cr.right, cr.bottom, dc, 0, 0, SRCCOPY);
     SelectObject(dc, of);
     for f in [f_title, f_txt, f_small] { DeleteObject(f); }
@@ -118,19 +132,19 @@ unsafe fn paint(h: HWND) {
 
 pub unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
-    let _ = x;
     match m {
         WM_PAINT => { paint(h); 0 }
         WM_ERASEBKGND => 1,
         WM_MOUSEMOVE => {
-            let k = row_at(y).map_or(-1, |i| i as i32);
+            let k = row_at(x, y).map_or(-1, |i| i as i32);
             if HOT.replace(k) != k { InvalidateRect(h, ptr::null(), 0); }
             0
         }
         WM_LBUTTONDOWN => {
             let owner = OWNER.get() as HWND;
-            match row_at(y) {
+            match row_at(x, y) {
                 Some(CLEAR) => forget_recent(None),
+                Some(UNHIDE) => crate::menu::unhide_all(),
                 Some(i) => {
                     let (_, _, get, set) = ROWS[i];
                     let on = !get(&prefs_now());

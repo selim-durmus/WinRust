@@ -22,7 +22,7 @@ If UAC asks for **another administrator's** password, the per-user settings (sta
 
 **Update:** download the new `WinRust.exe` from the releases page, run it as administrator and press **Update WinRust**. Installed plugins are updated, missing ones installed; your settings and the saved original Windows values stay.
 
-The installer is in English. The **Русский** button in its corner (or "WinRust apps in Русский" in the bar's right-click menu) switches every WinRust program to Russian.
+Every WinRust program is in English.
 
 ## Remove
 
@@ -88,7 +88,7 @@ In short: **85–99% faster or smaller in every size/speed test, and equal on id
 ![Taskbar menu](docs/screenshots/taskbar-menu.png)
 ![Bar menu, new look](docs/screenshots/topbar-menu-new.png)
 
-**Task Manager** (Russian UI)
+**Task Manager**
 
 ![Task Manager](docs/screenshots/task-manager.webp)
 
@@ -106,7 +106,7 @@ src/            the installer (plugin-launcher.exe)
   main.rs         the plugin table PLUGINS: name, texts, install/uninstall pair, icon
   install/        what each plugin changes and how it is undone (one file per plugin)
   cli.rs, ui.rs   the command line and the window; both call the same install functions
-common/         winrust-common: language switch (t!/tf!), UI styles and palettes, reg.exe output parser, NTFS MFT reader
+common/         winrust-common: UI styles and palettes, reg.exe output parser, NTFS MFT reader
 plugins/        sources of every plugin, each its own crate
 ReShell/        reshell (desktop hotkeys, topbar safety net), ships with topbar
 payload.txt     the exes embedded into the installer, and where the build puts them

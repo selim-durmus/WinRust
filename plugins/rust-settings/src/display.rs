@@ -64,7 +64,7 @@ pub fn monitor_info() -> Option<(usize, usize, String, bool)> {
     let (name, primary) = selected()?;
     let label = selected_path().and_then(|p| friendly_name(&p)).unwrap_or_default();
     // no EDID name (a laptop's own panel often has none): a plain name instead of "\\.\DISPLAY1"
-    let fallback = || if primary && total == 1 { winrust_common::t!("Встроенный экран", "Built-in display").to_string() } else { winrust_common::tf!("Дисплей {}", "Display {}", name_text(&name).trim_start_matches(r"\\.\DISPLAY")) };
+    let fallback = || if primary && total == 1 { "Built-in display".to_string() } else { format!("Display {}", name_text(&name).trim_start_matches(r"\\.\DISPLAY")) };
     Some((SEL.get() % total.max(1) + 1, total, if label.is_empty() { fallback() } else { label }, primary))
 }
 

@@ -15,8 +15,6 @@ use std::{
     collections::HashMap,
     sync::atomic::{AtomicBool, AtomicIsize, Ordering::Relaxed},
 };
-#[macro_use]
-extern crate winrust_common;
 use winrust_common as i18n;
 use winrust_common::style::{Style, card, on_accent, pal, rgb, style, ui_face};
 mod clip;
@@ -719,12 +717,12 @@ unsafe fn tip_text(h: i32) -> String {
             let n = GetDateFormatW(0x0400, 2, &t, null(), b.as_mut_ptr(), 80).max(1) as usize - 1; // DATE_LONGDATE
             String::from_utf16_lossy(&b[..n])
         }
-        LANG => tf!("Язык ввода: {}", "Input language: {}", layout_names(layouts().1).0),
+        LANG => format!("Input language: {}", layout_names(layouts().1).0),
         WIFI_I => match net() {
-            Link::Wifi(q) => tf!("Wi‑Fi · сигнал {q}%", "Wi‑Fi · signal {q}%"),
-            Link::NoInternet(_) => t!("Wi‑Fi подключён, но интернета нет", "Wi‑Fi connected, no internet").into(),
-            Link::Cable => t!("Интернет по кабелю", "Internet over a cable").into(),
-            Link::Offline => t!("Нет подключения к сети", "Not connected").into(),
+            Link::Wifi(q) => format!("Wi‑Fi · signal {q}%"),
+            Link::NoInternet(_) => "Wi‑Fi connected, no internet".into(),
+            Link::Cable => "Internet over a cable".into(),
+            Link::Offline => "Not connected".into(),
         },
         VOL_I => vol_tip(),
         BAT_I => match BAT.get() {
@@ -2185,15 +2183,15 @@ unsafe fn save_bitmap(bmp: HBITMAP) -> Option<String> {
 unsafe fn clip_notice(bar: HWND) {
     let name = clip::DONE.lock().ok().and_then(|mut d| d.take()).unwrap_or_default();
     KillTimer(bar, 2);
-    show_tip(tf!("Фрагмент сохранён: {name}\nи скопирован в буфер обмена", "Snip saved: {name}\nand copied to the clipboard"), GetSystemMetrics(SM_CXSCREEN) / 2);
+    show_tip(format!("Snip saved: {name}\nand copied to the clipboard"), GetSystemMetrics(SM_CXSCREEN) / 2);
     SetTimer(bar, 6, 2500, None);
 }
 
 /// PrtSc pressed: take the screenshot, then say so above the bar for a moment.
 unsafe fn screenshot_notice(bar: HWND) {
     let msg = match screenshot() {
-        Some(n) => tf!("Скриншот сохранён: {n}\nи скопирован в буфер обмена", "Screenshot saved: {n}\nand copied to the clipboard"),
-        None => t!("Не удалось сделать скриншот", "Could not take a screenshot").to_string(),
+        Some(n) => format!("Screenshot saved: {n}\nand copied to the clipboard"),
+        None => "Could not take a screenshot".to_string(),
     };
     KillTimer(bar, 2);
     show_tip(msg, GetSystemMetrics(SM_CXSCREEN) / 2);
@@ -2228,8 +2226,8 @@ unsafe fn lang_menu(bar: HWND) {
         let (name, short) = layout_names(k);
         fly::MItem::new(name).on(k == cur).hint(Box::leak(short.into_boxed_str())) // a handful of short strings, kept for the bar's lifetime
     }).collect();
-    items.push(fly::MItem::new(t!("Языковые параметры", "Language settings")).sep());
-    let head = (null_mut(), "\u{E775}", t!("Язык ввода", "Input language").to_string(), t!("Win+Пробел — следующий", "Win+Space — next one").to_string());
+    items.push(fly::MItem::new("Language settings").sep());
+    let head = (null_mut(), "\u{E775}", "Input language".to_string(), "Win+Space — next one".to_string());
     fly::menu(tip_cx(&bar_layout(bar), LANG), Some(head), items, move |i| match list.get(i) {
         Some(&k) => set_lang(bar, k),
         None => open(&wide("ms-settings:regionlanguage")),
@@ -2656,17 +2654,9 @@ fn wstr_of(w: &[u16]) -> String {
     String::from_utf16_lossy(&w[..w.iter().position(|&c| c == 0).unwrap_or(w.len())])
 }
 
-/// "1 окно", "3 окна", "5 окон".
-fn windows_ru(n: usize) -> String {
-    if en!() {
-        return format!("{n} {}", if n == 1 { "window" } else { "windows" });
-    }
-    let w = match (n % 10, n % 100) {
-        (1, x) if x != 11 => "окно",
-        (2..=4, x) if !(12..=14).contains(&x) => "окна",
-        _ => "окон",
-    };
-    format!("{n} {w}")
+/// "1 window", "3 windows".
+fn windows_count(n: usize) -> String {
+    format!("{n} {}", if n == 1 { "window" } else { "windows" })
 }
 
 /// Right-click menu of an app button, like the Windows 11 jump list: the app on top, its windows (when there are several),
@@ -2688,9 +2678,9 @@ unsafe fn app_menu(hwnd: HWND, h: i32) {
     let stem = std::path::Path::new(&launch).file_stem().unwrap_or_default().to_string_lossy().to_string();
     let name: String = stem.chars().take(1).flat_map(char::to_uppercase).chain(stem.chars().skip(1)).collect();
     let sub = match (wins.len(), pin.is_some()) {
-        (0, _) => t!("Закреплено · не запущено", "Pinned · not running").to_string(),
-        (n, true) => tf!("Закреплено · {}", "Pinned · {}", windows_ru(n)),
-        (n, false) => tf!("Запущено · {}", "Running · {}", windows_ru(n)),
+        (0, _) => "Pinned · not running".to_string(),
+        (n, true) => format!("Pinned · {}", windows_count(n)),
+        (n, false) => format!("Running · {}", windows_count(n)),
     };
     let icon = if picon.is_null() { bicon } else { picon };
     let mut items: Vec<(fly::MItem, A)> = Vec::new();
@@ -2702,21 +2692,21 @@ unsafe fn app_menu(hwnd: HWND, h: i32) {
         }
     }
     if !launch.is_empty() {
-        let it = fly::MItem::new(if wins.is_empty() { t!("Открыть", "Open") } else { t!("Новое окно", "New window") });
+        let it = fly::MItem::new(if wins.is_empty() { "Open" } else { "New window" });
         items.push((if items.is_empty() { it } else { it.sep() }, A::Open));
     }
     if pin.is_some() {
-        items.push((fly::MItem::new(t!("Открепить от панели", "Unpin from the bar")), A::Pin));
+        items.push((fly::MItem::new("Unpin from the bar"), A::Pin));
     } else if !exe.is_empty() {
-        items.push((fly::MItem::new(t!("Закрепить на панели", "Pin to the bar")), A::Pin));
+        items.push((fly::MItem::new("Pin to the bar"), A::Pin));
     }
     if !launch.is_empty() {
         let s = fly::start_pinned(&launch);
-        items.push((fly::MItem::new(if s { t!("Убрать из Пуска", "Remove from Start") } else { t!("Добавить в Пуск", "Add to Start") }), A::Start));
+        items.push((fly::MItem::new(if s { "Remove from Start" } else { "Add to Start" }), A::Start));
     }
     if !wins.is_empty() {
-        items.push((fly::MItem::new(if wins.len() > 1 { t!("Закрыть все окна", "Close all windows") } else { t!("Закрыть окно", "Close window") }).hint("Alt+F4").sep(), A::Close));
-        items.push((fly::MItem::new(t!("Завершить процесс", "End process")).danger(), A::Kill));
+        items.push((fly::MItem::new(if wins.len() > 1 { "Close all windows" } else { "Close window" }).hint("Alt+F4").sep(), A::Close));
+        items.push((fly::MItem::new("End process").danger(), A::Kill));
     }
     let acts: Vec<A> = items.iter().map(|x| x.1).collect();
     let items = items.into_iter().map(|x| x.0).collect();
@@ -2896,6 +2886,31 @@ unsafe fn add_to_start(files: &[String]) {
 /// WM_COPYDATA dwData of `topbar --pin-start <path>` (the "Pin to Start" verb the installer registers for files and
 /// folders): the path, UTF-16 without the terminating zero.
 const PIN_START: usize = 0x5753_5450; // "WSTP"
+/// The same for the taskbar: `topbar --pin-bar <path>` and the file manager's "Pin to taskbar".
+const PIN_BAR: usize = 0x5753_5442; // "WSTB"
+
+/// `topbar --pin-bar <path>`: hands the path to the running bar, which pins it. Without a bar the pin (a shortcut in
+/// Windows' pinned-taskbar folder) is made here and shows at the bar's next start.
+unsafe fn pin_bar_cli(path: &str) {
+    let path = std::path::absolute(path).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| path.to_string());
+    let bar = FindWindowW(wide("topbar").as_ptr(), null());
+    if !bar.is_null() {
+        let w: Vec<u16> = path.encode_utf16().collect();
+        let cds = Cds { dw: PIN_BAR, cb: (w.len() * 2) as u32, p: w.as_ptr() as *const u8 };
+        let mut r = 0usize;
+        if SendMessageTimeoutW(bar, WM_COPYDATA, 0, &cds as *const _ as isize, SMTO_ABORTIFHUNG, 3000, &mut r) != 0 && r == 1 {
+            return;
+        }
+    }
+    let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    pin_to_bar(&path);
+}
+
+/// Pins a file, folder or program to the bar (what a drop on the bar does), named after it.
+unsafe fn pin_to_bar(path: &str) {
+    let name = std::path::Path::new(path).file_stem().map_or_else(|| path.to_string(), |n| n.to_string_lossy().into_owned());
+    pin_from_start(path, &name);
+}
 
 /// `topbar --pin-start <path>`: hands the path to the running bar, which adds it to its Start panel. Without a bar it is
 /// written to the Start list file, where the bar finds it at its next start.
@@ -2916,9 +2931,9 @@ unsafe fn pin_start_cli(path: &str) {
     fly::pin_offline(&path);
 }
 
-/// The path inside a PIN_START WM_COPYDATA.
+/// The path inside a PIN_START / PIN_BAR WM_COPYDATA.
 unsafe fn pin_start_path(c: &Cds) -> Option<String> {
-    if c.dw != PIN_START || c.p.is_null() || c.cb == 0 || c.cb % 2 != 0 || c.cb > 64 * 1024 {
+    if (c.dw != PIN_START && c.dw != PIN_BAR) || c.p.is_null() || c.cb == 0 || c.cb % 2 != 0 || c.cb > 64 * 1024 {
         return None;
     }
     let w = std::slice::from_raw_parts(c.p as *const u16, c.cb as usize / 2);
@@ -3014,7 +3029,7 @@ unsafe fn set_search_shown(on: bool) {
 
 /// Right-click on the search button: hide it (it comes back from Bar style…).
 unsafe fn search_menu(cx: i32) {
-    let items = vec![fly::MItem::new(t!("Скрыть кнопку поиска", "Hide the search button"))];
+    let items = vec![fly::MItem::new("Hide the search button")];
     fly::menu(cx, None, items, |i| {
         if i == 0 {
             set_search_shown(false);
@@ -3026,17 +3041,17 @@ unsafe fn search_menu(cx: i32) {
 /// WinRust programs), auto-hide, the search button, the panel's opacity and putting the windows side by side.
 unsafe fn style_menu(cx: i32) {
     let bar = BAR.load(Relaxed) as HWND;
-    let names = [t!("Обычный", "Normal"), t!("Терминал", "Terminal"), t!("Плавающий док", "Floating dock"), t!("Тайлинг", "Tiling"), t!("Белая дорога", "White road")];
+    let names = ["Normal", "Terminal", "Floating dock", "Tiling", "White road"];
     let mut items: Vec<fly::MItem> = i18n::style::ALL.iter().zip(names).map(|(&s, n)| fly::MItem::new(n).on(s == style())).collect();
-    items.push(fly::MItem::new(t!("Разложить окна плиткой", "Tile the windows")).sep());
-    items.push(fly::MItem::new(t!("Скрывать панель автоматически", "Hide the bar automatically")).on(i18n::style::autohide()));
-    items.push(fly::MItem::new(t!("Кнопка поиска", "Search button")).on(search_shown())); // right-click on it hides it too
+    items.push(fly::MItem::new("Tile the windows").sep());
+    items.push(fly::MItem::new("Hide the bar automatically").on(i18n::style::autohide()));
+    items.push(fly::MItem::new("Search button").on(search_shown())); // right-click on it hides it too
     // the panel behind the buttons: solid, translucent or clear (the wallpaper shows through; good on OLED screens)
     let op = i18n::style::bar_opacity();
-    items.push(fly::MItem::new(t!("Сплошная панель", "Solid bar")).on(op == 100).sep());
-    items.push(fly::MItem::new(t!("Полупрозрачная панель", "Translucent bar")).on((1..100).contains(&op)));
-    items.push(fly::MItem::new(t!("Прозрачная панель", "Clear bar")).on(op == 0));
-    let head = (null_mut(), "\u{E713}", t!("Стиль", "Style").to_string(), t!("Вид панели и программ WinRust", "Look of the bar and the WinRust programs").to_string());
+    items.push(fly::MItem::new("Solid bar").on(op == 100).sep());
+    items.push(fly::MItem::new("Translucent bar").on((1..100).contains(&op)));
+    items.push(fly::MItem::new("Clear bar").on(op == 0));
+    let head = (null_mut(), "\u{E713}", "Style".to_string(), "Look of the bar and the WinRust programs".to_string());
     let (tile, hide) = (i18n::style::ALL.len(), i18n::style::ALL.len() + 1);
     fly::menu(cx, Some(head), items, move |i| match i18n::style::ALL.get(i) {
         Some(&s) => {
@@ -3269,7 +3284,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_DROPFILES => on_drop(hwnd, wp as HDROP),
         WM_COPYDATA => match pin_start_path(&*(lp as *const Cds)) {
             Some(p) => {
-                add_to_start(&[p]);
+                if (*(lp as *const Cds)).dw == PIN_BAR { pin_to_bar(&p); } else { add_to_start(&[p]); }
                 return 1;
             }
             None => return 0,
@@ -3423,6 +3438,10 @@ fn main() {
         }
         if let Some(p) = std::env::args().skip_while(|a| a != "--pin-start").nth(1) {
             pin_start_cli(&p);
+            return;
+        }
+        if let Some(p) = std::env::args().skip_while(|a| a != "--pin-bar").nth(1) {
+            pin_bar_cli(&p);
             return;
         }
         if std::env::args().any(|a| a == "--shot") {

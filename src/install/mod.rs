@@ -95,15 +95,15 @@ pub(crate) fn with_payload<T>(need: &[&str], f: impl FnOnce(&Path) -> Result<T, 
     fs::create_dir_all(&d).map_err(|e| format!("{}: {e}", d.display()))?;
     let disk = disk_payload();
     let unpack = |n: &&str| -> Result<(), String> {
-        let bytes = PAYLOAD.iter().find(|(m, _)| m == n).ok_or(tf!("нет {n} в сборке", "{n} is missing from the build"))?.1;
+        let bytes = PAYLOAD.iter().find(|(m, _)| m == n).ok_or(format!("{n} is missing from the build"))?.1;
         match disk.as_ref().map(|p| p.join(n)).filter(|p| p.is_file()) {
             Some(src) => {
-                log(&tf!("{n}: из {}", "{n}: from {}", src.display()));
+                log(&format!("{n}: from {}", src.display()));
                 fs::copy(src, d.join(n)).map(|_| ())
             }
             None => fs::write(d.join(n), bytes),
         }
-        .map_err(|e| tf!("распаковка {n}: {e}", "unpacking {n}: {e}"))
+        .map_err(|e| format!("unpacking {n}: {e}"))
     };
     let r = need.iter().try_for_each(unpack).and_then(|_| f(&d));
     let _ = fs::remove_dir_all(&d);
@@ -122,40 +122,40 @@ pub(crate) fn checkpoint() -> Result<(), String> {
 // Shared by the window and the command line, so both do exactly the same thing.
 pub(crate) fn install_plugin(i: usize) -> Result<String, String> {
     let p = &PLUGINS[i];
-    let (inst, uninst) = p.actions.ok_or(t!("установка недоступна", "installation is not available"))?;
-    init().inspect_err(|e| log(&tf!("{}: ОШИБКА {e}", "{}: ERROR {e}", p.name)))?; // before anything is written: no user, no install
+    let (inst, uninst) = p.actions.ok_or("installation is not available")?;
+    init().inspect_err(|e| log(&format!("{}: ERROR {e}", p.name)))?; // before anything is written: no user, no install
     let was = (p.installed)(); // already installed = an update: a failure must not remove the working copy
     WARN.lock().unwrap().clear();
-    soft(t!("точка восстановления не создана", "restore point was not created"), checkpoint());
+    soft("restore point was not created", checkpoint());
     if let Err(e) = inst() {
-        log(&tf!("{}: ОШИБКА {e}", "{}: ERROR {e}", p.name));
+        log(&format!("{}: ERROR {e}", p.name));
         if was {
             return Err(e);
         }
-        let back = uninst().err().map_or(String::new(), |u| tf!("; откат: {u}", "; rollback: {u}"));
-        return Err(tf!("{e} (установка отменена, изменения возвращены{back})", "{e} (installation cancelled, changes reverted{back})"));
+        let back = uninst().err().map_or(String::new(), |u| format!("; rollback: {u}"));
+        return Err(format!("{e} (installation cancelled, changes reverted{back})"));
     }
     let w = WARN.lock().unwrap().clone();
-    log(&format!("{}: {} {}", p.name, if was { t!("обновлён", "updated") } else { t!("установлен", "installed") }, w.join(" | ")));
-    let note = if w.is_empty() { String::new() } else { tf!(" Предупреждений: {} (см. %ProgramData%\\plugin-launcher\\install.log).", " Warnings: {} (see %ProgramData%\\plugin-launcher\\install.log).", w.len()) };
-    Ok(format!("{} {}.{note}", p.name, if was { t!("обновлён", "updated") } else { t!("установлен", "installed") }))
+    log(&format!("{}: {} {}", p.name, if was { "updated" } else { "installed" }, w.join(" | ")));
+    let note = if w.is_empty() { String::new() } else { format!(" Warnings: {} (see %ProgramData%\\plugin-launcher\\install.log).", w.len()) };
+    Ok(format!("{} {}.{note}", p.name, if was { "updated" } else { "installed" }))
 }
 
 pub(crate) fn uninstall_plugin(i: usize) -> Result<String, String> {
     let p = &PLUGINS[i];
-    let (_, uninst) = p.actions.ok_or(t!("удаление недоступно", "uninstall is not available"))?;
+    let (_, uninst) = p.actions.ok_or("uninstall is not available")?;
     WARN.lock().unwrap().clear();
     init_soft();
-    uninst().inspect_err(|e| log(&tf!("{}: ОШИБКА удаления {e}", "{}: uninstall ERROR {e}", p.name)))?;
+    uninst().inspect_err(|e| log(&format!("{}: uninstall ERROR {e}", p.name)))?;
     let w = WARN.lock().unwrap().clone();
-    log(&format!("{}: {} {}", p.name, t!("удалён", "removed"), w.join(" | ")));
-    let note = if w.is_empty() { String::new() } else { tf!(" Предупреждений: {} (см. %ProgramData%\\plugin-launcher\\install.log).", " Warnings: {} (see %ProgramData%\\plugin-launcher\\install.log).", w.len()) };
-    Ok(tf!("{} удалён, система восстановлена.{note}", "{} removed, system restored.{note}", p.name))
+    log(&format!("{}: {} {}", p.name, "removed", w.join(" | ")));
+    let note = if w.is_empty() { String::new() } else { format!(" Warnings: {} (see %ProgramData%\\plugin-launcher\\install.log).", w.len()) };
+    Ok(format!("{} removed, system restored.{note}", p.name))
 }
 
 pub(crate) fn rollback() -> Result<String, String> {
     init_soft();
     // reverse install order: rust-explorer (which switched Explorer off) goes before topbar, else the session is left with no panel and no shell
     let errs: Vec<String> = PLUGINS.iter().rev().filter(|p| (p.installed)()).filter_map(|p| p.actions.and_then(|a| a.1().err().map(|e| format!("{}: {e}", p.name)))).collect();
-    if errs.is_empty() { Ok(t!("Все плагины удалены, система восстановлена.", "All plugins removed, system restored.").into()) } else { Err(errs.join("; ")) }
+    if errs.is_empty() { Ok("All plugins removed, system restored.".into()) } else { Err(errs.join("; ")) }
 }

@@ -28,6 +28,7 @@ use std::{cell::{Cell, RefCell}, env, fs, os::windows::ffi::OsStrExt, path::{Pat
 use windows_sys::Win32::{Foundation::*, Graphics::Gdi::{BLACK_BRUSH, GetStockObject, InvalidateRect}, System::LibraryLoader::GetModuleHandleW, UI::{Controls::*, Input::KeyboardAndMouse::{GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_SHIFT}, Shell::*, WindowsAndMessaging::*}};
 
 mod fsx; // fast listing and the subfolder crawl
+mod menu; // our own right-click menu
 mod opts; // the settings page
 mod prefs; // settings, session, recents and bookmarks on disk
 mod sizes; // what is inside each folder, counted in the background
@@ -174,11 +175,22 @@ fn properties(path: &PathBuf) {
     unsafe { ShellExecuteExW(&mut sei) };
 }
 
-/// New folder / new empty file with a free name ("New folder", "New folder (2)", ...).
+/// New folder / new empty file with a free name ("New folder", "New folder (2)", ...). Once the folder is listed again
+/// it is selected and its name is open for typing (RENAME_NEW).
 fn new_entry(dir: &PathBuf, base: &str, folder: bool) {
     let (stem, ext) = match base.rsplit_once('.') { Some((s, e)) if !folder => (s.to_string(), format!(".{e}")), _ => (base.to_string(), String::new()) };
     let path = (1..).map(|n| dir.join(if n == 1 { base.to_string() } else { format!("{stem} ({n}){ext}") })).find(|p| !p.exists());
-    if let Some(p) = path { let _ = if folder { fs::create_dir(p) } else { fs::File::create(p).map(drop) }; }
+    if let Some(p) = path {
+        if if folder { fs::create_dir(&p) } else { fs::File::create(&p).map(drop) }.is_ok() {
+            sh::push_undo(sh::Undo::Created(p.clone()));
+            if !desk() { RENAME_NEW.set(p.file_name().map(|n| n.to_string_lossy().into_owned())); }
+        }
+    }
+}
+
+thread_local! {
+    /// The name of a folder or file just made here: the next listing of this folder selects it and starts renaming it.
+    static RENAME_NEW: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Pastes what is on the system clipboard (files copied or cut here or in any other file manager).
@@ -191,14 +203,20 @@ fn paste(h: HWND, dir: &PathBuf) {
 /// Right click on empty space: the folder's own menu.
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn bg_menu(h: HWND) {
-    let m = CreatePopupMenu();
-    for (id, t) in [(1usize, "New folder"), (2, "New text file"), (3, "Paste"), (4, "Refresh"), (5, "Properties")] { AppendMenuW(m, MF_STRING, id, w(t).as_ptr()); }
+    use menu::Item;
     let disk = tool("wiztree");
-    if disk.is_some() { AppendMenuW(m, MF_STRING, 6, w("Disk usage (WinRust Disk)").as_ptr()); }
+    let mut items = vec![];
+    // what Ctrl+Z would take back, on top while there is something
+    if let Some(u) = sh::undo_label() { items.extend([Item::new(7, "\u{E7A7}", u, "Ctrl+Z"), Item::sep()]); }
+    items.extend([
+        Item::new(1, "\u{E8F4}", "New folder", "Ctrl+N"), Item::new(2, "\u{E8A5}", "New text file", ""), Item::sep(),
+        Item::new(3, "\u{E77F}", "Paste", "Ctrl+V"), Item::new(4, "\u{E72C}", "Refresh", "F5"),
+    ]);
+    if disk.is_some() { items.push(Item::new(6, "\u{EDA2}", "Disk usage", "")); }
+    items.extend([Item::sep(), Item::new(5, "\u{E946}", "Properties", "Alt+Enter")]);
     let mut pt: POINT = std::mem::zeroed();
     GetCursorPos(&mut pt);
-    let id = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, ptr::null());
-    DestroyMenu(m);
+    let id = menu::track(h, items, (pt.x, pt.y)) as usize;
     let dir = cur_dir();
     match id {
         6 => { // wiztree takes the drive letter and asks for admin rights itself
@@ -209,6 +227,7 @@ unsafe fn bg_menu(h: HWND) {
         2 => new_entry(&dir, "New text document.txt", false),
         3 => paste(h, &dir),
         5 => properties(&dir),
+        7 => { sh::undo(h as _); }
         _ => {}
     }
     if id != 0 { reload(h); }
@@ -317,7 +336,16 @@ fn load(h: HWND, dir: PathBuf) {
 /// selection and the scroll position; another folder clears the filter and becomes the newest recent place.
 fn commit(h: HWND, dir: PathBuf, rows: Vec<Row>, record: bool) {
     let same = ST.with_borrow(|st| st.dir == dir) && !ui::searching();
-    let (keep, top) = if same && !desk() { kept() } else { (vec![], 0) };
+    let (mut keep, mut top) = if same && !desk() { kept() } else { (vec![], 0) };
+    let fresh = if same { RENAME_NEW.take() } else { RENAME_NEW.set(None); None };
+    if let Some(n) = &fresh { (keep, top) = (vec![n.clone()], 0); } // the new item alone is selected, and in view
+    // up (or back) out of a folder: the one you were in is selected and in view, so you see where you came from
+    let prev = ST.with_borrow(|st| st.dir.clone());
+    if !same && !desk() {
+        if let Some(first) = prev.strip_prefix(&dir).ok().and_then(|rel| rel.components().next()) {
+            keep = vec![first.as_os_str().to_string_lossy().into_owned()];
+        }
+    }
     if !desk() { unsafe { SetWindowTextW(h, w(&dir.to_string_lossy()).as_ptr()) }; }
     let (tab, edit, active) = ST.with_borrow_mut(|st| {
         if let Some(t) = st.tabs.get_mut(st.active) { *t = dir.clone(); }
@@ -348,6 +376,10 @@ fn commit(h: HWND, dir: PathBuf, rows: Vec<Row>, record: bool) {
         save_session();
     }
     show(h, &keep, top);
+    if let Some(n) = fresh {
+        let (list, i) = ST.with_borrow(|st| (st.list, st.rows.iter().position(|r| r.name == n)));
+        if let Some(i) = i { unsafe { SetFocus(list) }; edit_label(list, i); }
+    }
 }
 
 /// Names of the selected rows and the first row in view, to put them back after the rows are replaced.
@@ -403,8 +435,11 @@ fn show(h: HWND, keep: &[String], top: isize) {
     FILT.with_borrow_mut(|f| { f.total = total; f.capped = capped; f.scanning = scanning; f.scanned = scanned; f.flipped = flipped; });
     let n = rows.len();
     let list = ST.with_borrow_mut(|st| { st.rows = rows; st.list });
+    // the old rows go and the new ones come in one frame: drawing is off in between (a frame with no rows showed
+    // "This folder is empty" for an instant). A couple of empty rows at the end leave room to right-click the folder.
+    put(list, WM_SETREDRAW, 0, 0);
     put(list, LVM_DELETEALLITEMS, 0, 0);
-    put(list, LVM_SETITEMCOUNT, n, LVSICF_NOSCROLL as isize);
+    put(list, LVM_SETITEMCOUNT, if n > 0 && !desk() { n + PAD_ROWS } else { n }, LVSICF_NOSCROLL as isize);
     let set = |i: usize, state: u32| {
         let mut it: LVITEMW = unsafe { std::mem::zeroed() };
         it.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
@@ -422,12 +457,20 @@ fn show(h: HWND, keep: &[String], top: isize) {
         let mut r = RECT { left: LVIR_BOUNDS as i32, ..unsafe { std::mem::zeroed() } };
         put(list, LVM_GETITEMRECT, 0, &mut r as *mut _ as isize);
         put(list, LVM_SCROLL, 0, top * (r.bottom - r.top) as isize);
+    } else if !keep.is_empty() {
+        let f = put(list, LVM_GETNEXTITEM, usize::MAX, LVNI_FOCUSED as isize);
+        if f >= 0 { put(list, LVM_ENSUREVISIBLE, f as usize, 0); }
     } else if !terms.is_empty() && n > 0 {
         // (not on a plain listing: the list is still 0 px tall at start, and that scrolled the first row out of view)
         put(list, LVM_ENSUREVISIBLE, 0, 0);
     }
+    put(list, WM_SETREDRAW, 1, 0);
+    unsafe { InvalidateRect(list, ptr::null(), 0) };
     unsafe { ui::status_dirty(h) };
 }
+
+/// Empty rows after the last one: room to right-click the folder itself (new folder, paste) in a full list.
+pub const PAD_ROWS: usize = 2;
 
 /// The crawl of `dir` for the subfolder filter: the running or recent one (under a minute old), else a new one.
 fn crawl_for(h: HWND, dir: &Path) -> Arc<fsx::Crawl> {
@@ -692,31 +735,113 @@ fn open_file(p: &Path) {
     else { unsafe { ShellExecuteW(0 as _, ptr::null(), w(&p.to_string_lossy()).as_ptr(), ptr::null(), ptr::null(), SW_SHOWNORMAL) }; }
 }
 
+/// A shell place that is not a folder on disk (the Recycle Bin): the shell opens it, and it is no recent place.
+fn open_shell_place(p: &Path) {
+    unsafe { ShellExecuteW(0 as _, ptr::null(), w(&p.to_string_lossy()).as_ptr(), ptr::null(), ptr::null(), SW_SHOWNORMAL) };
+}
+
 /// Right click on a place in the side pane.
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn nav_menu(h: HWND, i: usize) {
-    let Some((p, sec)) = ui::nav_item(i) else { return };
-    let m = CreatePopupMenu();
-    AppendMenuW(m, MF_STRING, 1, w("Open in new tab").as_ptr());
-    AppendMenuW(m, MF_STRING, 2, w(if marked(&p) { "Remove bookmark" } else { "Bookmark" }).as_ptr());
-    if sec == ui::SEC_RECENT {
-        AppendMenuW(m, MF_STRING, 3, w("Remove from recents").as_ptr());
-        AppendMenuW(m, MF_STRING, 4, w("Clear recents").as_ptr());
+    use menu::Item;
+    // on a place: its own items first; anywhere in the pane: fold or unfold the whole pane
+    let place = ui::nav_item(i);
+    let mut items = vec![];
+    if let Some((p, sec)) = &place {
+        items.extend([Item::new(1, "\u{E8A7}", "Open in new tab", ""), Item::new(2, if marked(p) { "\u{E735}" } else { "\u{E734}" }, if marked(p) { "Remove bookmark" } else { "Bookmark" }, "")]);
+        if *sec == ui::SEC_RECENT { items.extend([Item::new(3, "\u{E711}", "Remove from recents", ""), Item::new(4, "\u{E74D}", "Clear recents", "")]); }
+        items.extend([Item::new(5, "\u{E946}", "Properties", ""), Item::sep()]);
     }
-    AppendMenuW(m, MF_SEPARATOR, 0, ptr::null());
-    AppendMenuW(m, MF_STRING, 5, w("Properties").as_ptr());
+    items.extend([Item::new(6, "\u{E70D}", "Expand all", ""), Item::new(7, "\u{E70E}", "Collapse all", "")]);
     let mut pt: POINT = std::mem::zeroed();
     GetCursorPos(&mut pt);
-    let id = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, ptr::null());
-    DestroyMenu(m);
-    match id {
-        1 => open_in_new_tab(h, p),
-        2 => toggle_mark(h, p),
-        3 => forget_recent(Some(&p)),
-        4 => forget_recent(None),
-        5 => properties(&p),
+    let id = menu::track(h, items, (pt.x, pt.y));
+    match (id, place) {
+        (6, _) => set_prefs(h, |p| p.collapsed.clear(), false), // every section open
+        (7, _) => { ui::nav_close_all(); set_prefs(h, |p| p.collapsed = vec![ui::SEC_RECENT, ui::SEC_MARKS, ui::SEC_DRIVES, ui::SEC_PLACES], false); }
+        (1, Some((p, _))) => open_in_new_tab(h, p),
+        (2, Some((p, _))) => toggle_mark(h, p),
+        (3, Some((p, _))) => forget_recent(Some(&p)),
+        (4, _) => forget_recent(None),
+        (5, Some((p, _))) => properties(&p),
         _ => {}
     }
+}
+
+/// The folder row under screen point (x, y) in the list: (row, its path). None over files, the empty rows, or outside.
+pub fn folder_row_at(x: i32, y: i32) -> Option<(usize, PathBuf)> {
+    let list = ST.with(|c| c.try_borrow().map(|s| s.list).unwrap_or(ptr::null_mut()));
+    let mut p = POINT { x, y };
+    unsafe { windows_sys::Win32::Graphics::Gdi::ScreenToClient(list, &mut p) };
+    let mut ht: LVHITTESTINFO = unsafe { std::mem::zeroed() };
+    ht.pt = p;
+    let i = usize::try_from(put(list, LVM_HITTEST, 0, &mut ht as *mut _ as isize)).ok()?;
+    ST.with(|c| c.try_borrow().ok().and_then(|s| s.rows.get(i).filter(|r| r.dir).map(|r| (i, s.dir.join(&r.name)))))
+}
+
+/// Does what the file menu left to the window: rename in the list, WinRust's pins, the bookmark.
+fn menu_choice(h: HWND, c: sh::Choice, paths: &[PathBuf]) {
+    match c {
+        sh::Choice::Rename => rename_selected(),
+        sh::Choice::Delete => { let _ = sh::fileop(h, sh::Op::Delete, paths, &cur_dir()); }
+        sh::Choice::PinStart => paths.iter().for_each(|p| bar_pin(0x5753_5450, "--pin-start", p)),
+        sh::Choice::PinBar => paths.iter().for_each(|p| bar_pin(0x5753_5442, "--pin-bar", p)),
+        sh::Choice::Bookmark => if let Some(p) = paths.first() { toggle_mark(h, p.clone()) },
+        sh::Choice::Done => {}
+    }
+}
+
+/// Hands `path` to the running bar (topbar) to pin: `code` says where (Start panel or taskbar). With no bar running,
+/// topbar itself is started with `arg`, which writes it down for the bar's next start.
+fn bar_pin(code: usize, arg: &str, path: &Path) {
+    #[repr(C)]
+    struct Cds { dw: usize, cb: u32, p: *const u8 }
+    let wpath: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let cds = Cds { dw: code, cb: (wpath.len() * 2) as u32, p: wpath.as_ptr() as *const u8 };
+    unsafe {
+        let bar = FindWindowW(w("topbar").as_ptr(), ptr::null());
+        if !bar.is_null() {
+            // a bar that does not know the request (older than this file manager) answers 0: nothing else is tried,
+            // starting topbar.exe with an argument it does not know would start a second bar
+            let mut r = 0usize;
+            SendMessageTimeoutW(bar, 0x4A, 0, &cds as *const _ as isize, SMTO_ABORTIFHUNG, 3000, &mut r);
+            return;
+        }
+    }
+    // no bar running: topbar writes the Start entry down for its next start (every topbar knows --pin-start)
+    let exe = PathBuf::from(env::var_os("ProgramFiles").unwrap_or_default()).join(r"topbar	opbar.exe");
+    if arg == "--pin-start" && exe.is_file() { let _ = std::process::Command::new(exe).arg(arg).arg(path).spawn(); }
+}
+
+/// Ctrl+A: every item (not the empty rows at the end).
+fn select_all(list: HWND) {
+    let n = ST.with_borrow(|st| st.rows.len());
+    let it = |on: bool| LVITEMW { stateMask: LVIS_SELECTED, state: if on { LVIS_SELECTED } else { 0 }, ..unsafe { std::mem::zeroed() } };
+    put(list, LVM_SETITEMSTATE, usize::MAX, &it(true) as *const _ as isize);
+    for k in n..n + PAD_ROWS { put(list, LVM_SETITEMSTATE, k, &it(false) as *const _ as isize); }
+}
+
+/// Ctrl+Shift+C: the selected paths on the clipboard as text, one per line (quoted like Explorer's "Copy as path").
+fn copy_paths(h: HWND, paths: &[PathBuf]) {
+    let text: String = paths.iter().map(|p| format!("\"{}\"", p.display())).collect::<Vec<_>>().join("
+");
+    let _ = sh::clip_text(h as _, &text);
+}
+
+/// Starts renaming the focused row in the list (F2, or "Rename" from the menu).
+fn rename_selected() {
+    let list = ST.with_borrow(|st| st.list);
+    let i = put(list, LVM_GETNEXTITEM, usize::MAX, LVNI_FOCUSED as isize);
+    if i >= 0 { edit_label(list, i as usize); }
+}
+
+/// Opens row `i`'s name for typing; for a file only the part before the extension is selected, as in Explorer.
+fn edit_label(list: HWND, i: usize) {
+    let e = put(list, LVM_EDITLABELW, i, 0) as HWND;
+    if e.is_null() || ST.with_borrow(|st| st.rows.get(i).is_none_or(|r| r.dir)) { return; }
+    let mut buf = [0u16; 512];
+    let n = unsafe { GetWindowTextW(e, buf.as_mut_ptr(), 512) }.max(0) as usize;
+    if let Some(dot) = buf[..n].iter().rposition(|&c| c == '.' as u16).filter(|&d| d > 0) { put(e, EM_SETSEL, 0, dot as isize); }
 }
 
 fn open_in_new_tab(h: HWND, p: PathBuf) {
@@ -827,7 +952,7 @@ const ZOOM: [(View, i32); 22] = [
     (View::Icons, 256),
 ];
 const ZOOM_DETAILS: usize = 0;
-const ROW_PX: i32 = 27; // details and tree rows: compact, the size they keep
+const ROW_PX: i32 = 23; // details and tree rows: compact, the size they keep
 const ZOOM_ICONS: usize = 11; // 96 px pictures
 thread_local! {
     static ZOOM_AT: Cell<usize> = const { Cell::new(ZOOM_DETAILS) };
@@ -1058,8 +1183,132 @@ mod sh {
     use std::{cell::RefCell, ffi::c_void, os::windows::ffi::OsStrExt, path::PathBuf};
     use windows::{core::*, Win32::{Foundation::*, System::{Com::*, DataExchange::RegisterClipboardFormatW, Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock}, Ole::*, SystemServices::MODIFIERKEYS_FLAGS}, UI::{Shell::{Common::ITEMIDLIST, *}, WindowsAndMessaging::*}}};
 
-    #[derive(Clone, Copy)]
-    pub enum Op { Copy, Move, Delete }
+    #[derive(Clone, Copy, PartialEq)]
+    pub enum Op { Copy, Move, Delete, Purge } // Purge = delete for good (Shift+Delete), the shell asks first
+
+    /// What Ctrl+Z puts back, newest last. Each entry is one action (a whole paste, drop or delete).
+    pub enum Undo {
+        Moved(Vec<(PathBuf, PathBuf)>), // (where it is now, where it was)
+        Copied(Vec<PathBuf>),           // the copies made
+        Recycled(Vec<PathBuf>),         // where the items sit inside the Recycle Bin ($Recycle.Bin\...\$R...)
+        Renamed(PathBuf, PathBuf),      // (new path, old path)
+        Created(PathBuf),               // a new folder / file
+    }
+
+    thread_local! { static UNDO: RefCell<Vec<Undo>> = const { RefCell::new(Vec::new()) }; }
+
+    /// The menu's name for what Ctrl+Z would take back, if anything.
+    pub fn undo_label() -> Option<&'static str> {
+        UNDO.with_borrow(|v| v.last().map(|u| match u {
+            Undo::Moved(_) => "Undo move", Undo::Copied(_) => "Undo copy", Undo::Recycled(_) => "Undo delete",
+            Undo::Renamed(..) => "Undo rename", Undo::Created(_) => "Undo new item",
+        }))
+    }
+
+    pub fn push_undo(u: Undo) {
+        UNDO.with_borrow_mut(|v| { v.push(u); if v.len() > 50 { v.remove(0); } });
+    }
+
+    fn path_of(it: &IShellItem) -> Option<PathBuf> {
+        unsafe {
+            let p = it.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+            let s = p.to_string().ok();
+            CoTaskMemFree(Some(p.0 as *const c_void));
+            s.map(PathBuf::from)
+        }
+    }
+
+    /// Takes the newest action back: moves return, copies and new items go to the Recycle Bin, deleted items are
+    /// restored from it, renames are reversed. false = nothing to undo.
+    pub fn undo(h: *mut c_void) -> bool {
+        let Some(u) = UNDO.with_borrow_mut(|v| v.pop()) else { return false };
+        let item = |p: &PathBuf| unsafe { SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(wide(p).as_ptr()), None) };
+        let run = |f: &dyn Fn(&IFileOperation) -> Result<()>, flags: FILEOPERATION_FLAGS| -> Result<()> {
+            unsafe {
+                let fo: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL)?;
+                fo.SetOwnerWindow(HWND(h))?;
+                fo.SetOperationFlags(flags)?;
+                f(&fo)?;
+                fo.PerformOperations()
+            }
+        };
+        let _ = match u {
+            Undo::Moved(v) => run(&|fo| {
+                for (now, was) in &v {
+                    let (Some(dir), Some(name)) = (was.parent().map(PathBuf::from), was.file_name()) else { continue };
+                    let n: Vec<u16> = name.encode_wide().chain([0]).collect();
+                    unsafe { fo.MoveItem(&item(now)?, &item(&dir)?, PCWSTR(n.as_ptr()), None)?; }
+                }
+                Ok(())
+            }, FOF_NOCONFIRMMKDIR),
+            Undo::Copied(v) => run(&|fo| { for p in &v { unsafe { fo.DeleteItem(&item(p)?, None)?; } } Ok(()) }, FOF_ALLOWUNDO | FOF_NOCONFIRMATION),
+            Undo::Created(p) => run(&|fo| unsafe { fo.DeleteItem(&item(&p)?, None) }, FOF_ALLOWUNDO | FOF_NOCONFIRMATION),
+            Undo::Renamed(now, was) => std::fs::rename(&now, &was).map_err(|_| Error::from(E_FAIL)),
+            Undo::Recycled(v) => {
+                // the Recycle Bin's own "Restore" on each item: back where it came from, and gone from the bin. The
+                // delete reported the files' places on disk; the bin's items for them are found by that place
+                let keys: Vec<String> = v.iter().map(|p| p.to_string_lossy().to_lowercase()).collect();
+                let mut found: Vec<IShellItem> = vec![];
+                unsafe {
+                    if let Ok(bin) = SHGetKnownFolderItem::<IShellItem>(&FOLDERID_RecycleBinFolder, KF_FLAG_DEFAULT, None) {
+                        if let Ok(en) = bin.BindToHandler::<_, IEnumShellItems>(None, &BHID_EnumItems) {
+                            let mut one = [None];
+                            while en.Next(&mut one, None).is_ok() {
+                                let Some(it) = one[0].take() else { break };
+                                if path_of(&it).is_some_and(|p| keys.contains(&p.to_string_lossy().to_lowercase())) { found.push(it); }
+                            }
+                        }
+                    }
+                }
+                for it in &found {
+                    unsafe {
+                        let Ok(cm) = it.BindToHandler::<_, IContextMenu>(None, &BHID_SFUIObject) else { continue };
+                        let Ok(menu) = CreatePopupMenu() else { continue };
+                        if cm.QueryContextMenu(menu, 0, 1, 0x7FFF, CMF_NORMAL).is_ok() {
+                            let ci = CMINVOKECOMMANDINFO { cbSize: size_of::<CMINVOKECOMMANDINFO>() as u32, hwnd: HWND(h), lpVerb: PCSTR(b"undelete\0".as_ptr()), nShow: SW_SHOWNORMAL.0, ..Default::default() };
+                            let _ = cm.InvokeCommand(&ci);
+                        }
+                        let _ = DestroyMenu(menu);
+                    }
+                }
+                Ok(())
+            }
+        };
+        true
+    }
+
+    /// Notes where each item of a file operation ended up, for Undo.
+    #[implement(IFileOperationProgressSink)]
+    struct Sink { moved: RefCell<Vec<(PathBuf, PathBuf)>>, copied: RefCell<Vec<PathBuf>>, recycled: RefCell<Vec<PathBuf>> }
+
+    impl IFileOperationProgressSink_Impl for Sink_Impl {
+        fn StartOperations(&self) -> Result<()> { Ok(()) }
+        fn FinishOperations(&self, _: HRESULT) -> Result<()> { Ok(()) }
+        fn PreRenameItem(&self, _: u32, _: Ref<IShellItem>, _: &PCWSTR) -> Result<()> { Ok(()) }
+        fn PostRenameItem(&self, _: u32, _: Ref<IShellItem>, _: &PCWSTR, _: HRESULT, _: Ref<IShellItem>) -> Result<()> { Ok(()) }
+        fn PreMoveItem(&self, _: u32, _: Ref<IShellItem>, _: Ref<IShellItem>, _: &PCWSTR) -> Result<()> { Ok(()) }
+        fn PostMoveItem(&self, _: u32, it: Ref<IShellItem>, _: Ref<IShellItem>, _: &PCWSTR, hr: HRESULT, new: Ref<IShellItem>) -> Result<()> {
+            if hr.is_ok() { if let (Some(was), Some(now)) = (it.ok().ok().and_then(path_of), new.ok().ok().and_then(path_of)) { self.moved.borrow_mut().push((now, was)); } }
+            Ok(())
+        }
+        fn PreCopyItem(&self, _: u32, _: Ref<IShellItem>, _: Ref<IShellItem>, _: &PCWSTR) -> Result<()> { Ok(()) }
+        fn PostCopyItem(&self, _: u32, _: Ref<IShellItem>, _: Ref<IShellItem>, _: &PCWSTR, hr: HRESULT, new: Ref<IShellItem>) -> Result<()> {
+            if hr.is_ok() { if let Some(now) = new.ok().ok().and_then(path_of) { self.copied.borrow_mut().push(now); } }
+            Ok(())
+        }
+        fn PreDeleteItem(&self, _: u32, _: Ref<IShellItem>) -> Result<()> { Ok(()) }
+        fn PostDeleteItem(&self, _: u32, _: Ref<IShellItem>, hr: HRESULT, new: Ref<IShellItem>) -> Result<()> {
+            // recycled: `new` is the item inside the Recycle Bin (deleted for good: none)
+            if hr.is_ok() { if let Some(p) = new.ok().ok().and_then(path_of) { self.recycled.borrow_mut().push(p); } }
+            Ok(())
+        }
+        fn PreNewItem(&self, _: u32, _: Ref<IShellItem>, _: &PCWSTR) -> Result<()> { Ok(()) }
+        fn PostNewItem(&self, _: u32, _: Ref<IShellItem>, _: &PCWSTR, _: &PCWSTR, _: u32, _: HRESULT, _: Ref<IShellItem>) -> Result<()> { Ok(()) }
+        fn UpdateProgress(&self, _: u32, _: u32) -> Result<()> { Ok(()) }
+        fn ResetTimer(&self) -> Result<()> { Ok(()) }
+        fn PauseTimer(&self) -> Result<()> { Ok(()) }
+        fn ResumeTimer(&self) -> Result<()> { Ok(()) }
+    }
 
     fn known(id: &GUID) -> Option<PathBuf> {
         unsafe {
@@ -1073,10 +1322,24 @@ mod sh {
     /// [user Desktop, public Desktop] (the user one may be redirected, e.g. to OneDrive).
     pub fn desktop_dirs() -> Vec<PathBuf> { [&FOLDERID_Desktop, &FOLDERID_PublicDesktop].iter().filter_map(|id| known(id)).collect() }
 
-    /// Home and the user's own folders where they really are (they may be moved, e.g. to OneDrive), for the side pane.
+    /// The user's everyday folders where they really are (they may be moved, e.g. to OneDrive), for the side pane.
     pub fn places() -> Vec<PathBuf> {
-        [&FOLDERID_Profile, &FOLDERID_Desktop, &FOLDERID_Downloads, &FOLDERID_Documents, &FOLDERID_Pictures, &FOLDERID_Music, &FOLDERID_Videos]
+        [&FOLDERID_Desktop, &FOLDERID_Downloads, &FOLDERID_Documents, &FOLDERID_Pictures]
             .iter().filter_map(|id| known(id)).filter(|p| p.is_dir()).collect()
+    }
+
+    /// The Recycle Bin's small system icon (its index in the system image list), -1 if the shell gives none.
+    pub fn bin_icon() -> i32 {
+        unsafe {
+            let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
+            let bin: Vec<u16> = "::{645FF040-5081-101B-9F08-00AA002F954E}".encode_utf16().chain([0]).collect();
+            if SHParseDisplayName(PCWSTR(bin.as_ptr()), None, &mut pidl, 0, None).is_err() || pidl.is_null() { return -1; }
+            use windows_sys::Win32::UI::Shell as S;
+            let mut fi: S::SHFILEINFOW = std::mem::zeroed();
+            let ok = S::SHGetFileInfoW(pidl as *const u16, 0, &mut fi, size_of::<S::SHFILEINFOW>() as u32, S::SHGFI_PIDL | S::SHGFI_SYSICONINDEX | S::SHGFI_SMALLICON);
+            CoTaskMemFree(Some(pidl as *const c_void));
+            if ok != 0 { fi.iIcon } else { -1 }
+        }
     }
 
     pub fn init() { unsafe { let _ = OleInitialize(None); } }
@@ -1088,9 +1351,12 @@ mod sh {
         unsafe {
             let fo: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL)?;
             fo.SetOwnerWindow(HWND(h))?;
-            fo.SetOperationFlags(if matches!(op, Op::Delete) { FOF_ALLOWUNDO } else { FOF_RENAMEONCOLLISION })?;
+            fo.SetOperationFlags(match op { Op::Delete => FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE, Op::Purge => FILEOPERATION_FLAGS(0), _ => FOF_RENAMEONCOLLISION })?;
+            // where everything ends up is noted, for Ctrl+Z
+            let sink: IFileOperationProgressSink = Sink { moved: RefCell::new(vec![]), copied: RefCell::new(vec![]), recycled: RefCell::new(vec![]) }.into();
+            let cookie = fo.Advise(&sink).ok();
             let item = |p: &PathBuf| SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(wide(p).as_ptr()), None);
-            let dest = if matches!(op, Op::Delete) { None } else { Some(item(to)?) };
+            let dest = if matches!(op, Op::Delete | Op::Purge) { None } else { Some(item(to)?) };
             for p in from {
                 let it = item(p)?;
                 match (op, &dest) {
@@ -1099,7 +1365,14 @@ mod sh {
                     _ => fo.DeleteItem(&it, None)?,
                 }
             }
-            fo.PerformOperations()
+            let r = fo.PerformOperations();
+            if let Some(c) = cookie { let _ = fo.Unadvise(c); }
+            let s = sink.as_impl();
+            let (moved, copied, recycled) = (s.moved.take(), s.copied.take(), s.recycled.take());
+            if !moved.is_empty() { push_undo(Undo::Moved(moved)); }
+            if !copied.is_empty() { push_undo(Undo::Copied(copied)); }
+            if !recycled.is_empty() { push_undo(Undo::Recycled(recycled)); }
+            r
         }
     }
 
@@ -1137,6 +1410,25 @@ mod sh {
 
     pub fn clip_clear() { unsafe { let _ = OleSetClipboard(None); } }
 
+    /// Plain text on the clipboard.
+    pub fn clip_text(h: *mut c_void, text: &str) -> Result<()> {
+        use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+        let wt: Vec<u16> = text.encode_utf16().chain([0]).collect();
+        unsafe {
+            OpenClipboard(Some(HWND(h)))?;
+            let _ = EmptyClipboard();
+            let r = (|| -> Result<()> {
+                let g = GlobalAlloc(GMEM_MOVEABLE, wt.len() * 2)?;
+                std::ptr::copy_nonoverlapping(wt.as_ptr(), GlobalLock(g) as *mut u16, wt.len());
+                let _ = GlobalUnlock(g);
+                SetClipboardData(13, Some(HANDLE(g.0)))?; // CF_UNICODETEXT; the clipboard owns the memory from here
+                Ok(())
+            })();
+            let _ = CloseClipboard();
+            r
+        }
+    }
+
     struct Pidls(Vec<*mut ITEMIDLIST>);
     impl Drop for Pidls { fn drop(&mut self) { for p in &self.0 { unsafe { CoTaskMemFree(Some(*p as *const c_void)) }; } } }
 
@@ -1157,28 +1449,71 @@ mod sh {
 
     thread_local! { static CM2: RefCell<Option<IContextMenu2>> = const { RefCell::new(None) }; }
 
+    /// What a menu choice leaves to the window (the shell did everything else).
+    #[derive(PartialEq, Clone, Copy)]
+    pub enum Choice { Done, Rename, Delete, PinStart, PinBar, Bookmark }
+    const MY_START: u32 = 0x9001;
+    const MY_BAR: u32 = 0x9002;
+    const MY_MARK: u32 = 0x9003;
+
     /// Forwards owner-draw / init-popup menu messages so submenus like "Send to" get filled in.
     pub fn menu_msg(m: u32, wp: usize, lp: isize) -> bool {
         CM2.with_borrow(|c| c.as_ref().is_some_and(|c| unsafe { c.HandleMenuMsg(m, WPARAM(wp), LPARAM(lp)).is_ok() }))
     }
 
-    /// The real shell context menu for `paths`, so 7-Zip/Git/etc. entries show up.
-    pub fn show(h: *mut c_void, paths: &[PathBuf]) -> Result<()> {
+    /// The shell's context menu for `paths` (so 7-Zip, Git, "Open with", "Send to" and the rest show up), shown in our
+    /// own menu window (menu.rs), with WinRust's own pins and bookmark added. What the caller still has to do comes back.
+    pub fn show(h: *mut c_void, paths: &[PathBuf]) -> Result<Choice> {
         unsafe {
             let hwnd = HWND(h);
             let cm: IContextMenu = ui(hwnd, paths)?;
             let menu = CreatePopupMenu()?;
-            cm.QueryContextMenu(menu, 0, 1, 0x7FFF, CMF_NORMAL).ok()?;
-            CM2.set(cm.cast::<IContextMenu2>().ok());
+            cm.QueryContextMenu(menu, 0, 1, 0x7FFF, CMF_NORMAL | CMF_CANRENAME).ok()?;
+            let cm2 = cm.cast::<IContextMenu2>().ok();
+            let cm3 = cm.cast::<IContextMenu3>().ok();
+            CM2.set(cm2.clone());
+            // the shell's handler fills submenus and draws some icons when told to (the newer interface first: some
+            // handlers draw only through it)
+            // handlers differ in which one they draw through: drawing is asked of both (twice does no harm); filling a
+            // submenu only of the first that takes it (twice would list "Send to" twice)
+            let msg = |m: u32, wp: usize, lp: isize| {
+                let (a, b) = (|| cm3.as_ref().is_some_and(|c| c.HandleMenuMsg2(m, WPARAM(wp), LPARAM(lp), None).is_ok()), || cm2.as_ref().is_some_and(|c| c.HandleMenuMsg(m, WPARAM(wp), LPARAM(lp)).is_ok()));
+                if m == WM_DRAWITEM || m == WM_MEASUREITEM { let x = a(); b() || x } else { a() || b() }
+            };
+            let verb = |id: u32| -> String {
+                if id == 0 { return String::new(); }
+                let mut b = [0u16; 128];
+                if cm.GetCommandString(id as usize - 1, GCS_VERBW, None, PSTR(b.as_mut_ptr() as *mut u8), 128).is_err() { return String::new(); }
+                String::from_utf16_lossy(&b[..b.iter().position(|&c| c == 0).unwrap_or(0)]).to_lowercase()
+            };
+            let mut items = crate::menu::from_hmenu(menu.0 as _, &msg, &verb);
+            // WinRust's own: the bar's Start panel and taskbar (Windows' pins are left out), a bookmark for a folder;
+            // before "Send to"
+            use crate::menu::Item;
+            let mut ours = vec![Item::new(MY_START, "\u{E718}", "Pin to Start", ""), Item::new(MY_BAR, "\u{E718}", "Pin to taskbar", "")];
+            if paths.len() == 1 && paths[0].is_dir() { ours.push(Item::new(MY_MARK, if super::marked(&paths[0]) { "\u{E735}" } else { "\u{E734}" }, if super::marked(&paths[0]) { "Remove bookmark" } else { "Bookmark" }, "Ctrl+D")); }
+            ours.push(Item::sep());
+            let at = items.iter().position(|i| !i.sub.is_empty() && i.text.eq_ignore_ascii_case("send to")).map_or(items.len(), |i| i.saturating_sub(1).max(1).min(items.len()));
+            items.splice(at..at, ours);
             let mut pt = POINT::default();
             GetCursorPos(&mut pt)?;
-            let id = TrackPopupMenuEx(menu, TPM_RETURNCMD.0 | TPM_RIGHTBUTTON.0, pt.x, pt.y, hwnd, None).0;
-            CM2.set(None);
-            if id > 0 {
-                let ci = CMINVOKECOMMANDINFO { cbSize: size_of::<CMINVOKECOMMANDINFO>() as u32, hwnd, lpVerb: PCSTR((id - 1) as usize as *const u8), nShow: SW_SHOWNORMAL.0, ..Default::default() };
-                cm.InvokeCommand(&ci)?;
+            let id = crate::menu::track(h as _, items, (pt.x, pt.y));
+            let mut rename = Choice::Done;
+            if id >= MY_START {
+                rename = match id { MY_START => Choice::PinStart, MY_BAR => Choice::PinBar, _ => Choice::Bookmark };
+            } else if id > 0 {
+                if verb(id) == "rename" {
+                    rename = Choice::Rename; // renaming happens in our list, not through the shell
+                } else if verb(id) == "delete" {
+                    rename = Choice::Delete; // through our file operation: Ctrl+Z can bring it back
+                } else {
+                    let ci = CMINVOKECOMMANDINFO { cbSize: size_of::<CMINVOKECOMMANDINFO>() as u32, hwnd, lpVerb: PCSTR((id - 1) as usize as *const u8), nShow: SW_SHOWNORMAL.0, ..Default::default() };
+                    cm.InvokeCommand(&ci)?;
+                }
             }
-            DestroyMenu(menu)
+            CM2.set(None);
+            DestroyMenu(menu)?;
+            Ok(rename)
         }
     }
 
@@ -1209,14 +1544,64 @@ mod sh {
     }
 
     #[implement(IDropTarget)]
-    struct DropT { main: isize }
+    struct DropT { main: isize, paths: RefCell<Vec<PathBuf>>, tabs: bool }
+
+    thread_local! {
+        /// A drag resting on another tab: which one and since when (after a moment it opens, to drop into its folder).
+        static TAB_HOVER: std::cell::Cell<Option<(usize, std::time::Instant)>> = const { std::cell::Cell::new(None) };
+    }
+    const TAB_OPEN_MS: u128 = 550;
+
+    /// Where a drop at screen point `pt` goes: the folder under it (its row, to highlight), or the shown folder.
+    fn target(pt: &POINTL) -> (PathBuf, isize) {
+        match super::folder_row_at(pt.x, pt.y) { Some((i, p)) => (p, i as isize), None => (super::cur_dir(), -1) }
+    }
+
+    /// Over the tab row: the folder of the tab under the pointer.
+    fn tab_target(pt: &POINTL) -> Option<(usize, PathBuf)> {
+        let i = super::ui::tab_at(pt.x, pt.y)?;
+        super::ST.with(|c| c.try_borrow().ok().and_then(|s| s.tabs.get(i).cloned())).map(|p| (i, p))
+    }
+
+    /// What dropping `paths` into `to` does: copy (other drive, or Ctrl), move, or nothing (into the folder they are in,
+    /// or into one of themselves).
+    fn drop_effect(paths: &[PathBuf], to: &PathBuf, k: MODIFIERKEYS_FLAGS) -> DROPEFFECT {
+        if paths.is_empty() { return effect(k); }
+        if paths.iter().any(|p| p == to || to.starts_with(p)) || paths.iter().all(|p| p.parent() == Some(to.as_path())) { return DROPEFFECT_NONE; }
+        if k.0 & 8 != 0 || paths[0].components().next() != to.components().next() { DROPEFFECT_COPY } else { DROPEFFECT_MOVE }
+    }
 
     fn effect(k: MODIFIERKEYS_FLAGS) -> DROPEFFECT { if k.0 & 8 != 0 { DROPEFFECT_COPY } else { DROPEFFECT_MOVE } } // 8 = MK_CONTROL
 
     impl IDropTarget_Impl for DropT_Impl {
-        fn DragEnter(&self, _o: Ref<'_, IDataObject>, k: MODIFIERKEYS_FLAGS, _pt: &POINTL, e: *mut DROPEFFECT) -> Result<()> { unsafe { *e = effect(k) }; Ok(()) }
-        fn DragOver(&self, k: MODIFIERKEYS_FLAGS, _pt: &POINTL, e: *mut DROPEFFECT) -> Result<()> { unsafe { *e = effect(k) }; Ok(()) }
-        fn DragLeave(&self) -> Result<()> { Ok(()) }
+        fn DragEnter(&self, o: Ref<'_, IDataObject>, k: MODIFIERKEYS_FLAGS, pt: &POINTL, e: *mut DROPEFFECT) -> Result<()> {
+            *self.paths.borrow_mut() = o.ok().ok().and_then(|o| hdrop_paths(o).ok()).unwrap_or_default();
+            self.DragOver(k, pt, e)
+        }
+        fn DragOver(&self, k: MODIFIERKEYS_FLAGS, pt: &POINTL, e: *mut DROPEFFECT) -> Result<()> {
+            if self.tabs {
+                // held on another tab for a moment, it opens: the drag goes on into that folder's list
+                let Some((i, to)) = tab_target(pt) else { TAB_HOVER.set(None); unsafe { *e = DROPEFFECT_NONE }; return Ok(()) };
+                let active = super::ST.with(|c| c.try_borrow().map_or(i, |s| s.active));
+                match TAB_HOVER.get() {
+                    _ if i == active => TAB_HOVER.set(None),
+                    Some((j, t)) if j == i => if t.elapsed().as_millis() >= TAB_OPEN_MS {
+                        TAB_HOVER.set(None);
+                        unsafe { let _ = PostMessageW(Some(HWND(self.main as *mut c_void)), super::ui::WM_UI, WPARAM(1), LPARAM(i as isize)); }
+                    },
+                    _ => TAB_HOVER.set(Some((i, std::time::Instant::now()))),
+                }
+                unsafe { *e = drop_effect(&self.paths.borrow(), &to, k) };
+                return Ok(());
+            }
+            if super::desk() { unsafe { *e = effect(k) }; return Ok(()); }
+            let (to, row) = target(pt);
+            let fx = drop_effect(&self.paths.borrow(), &to, k);
+            super::ui::set_drop_row(if fx == DROPEFFECT_NONE { -1 } else { row }); // the folder it would go into lights up
+            unsafe { *e = fx };
+            Ok(())
+        }
+        fn DragLeave(&self) -> Result<()> { TAB_HOVER.set(None); super::ui::set_drop_row(-1); Ok(()) }
         fn Drop(&self, o: Ref<'_, IDataObject>, k: MODIFIERKEYS_FLAGS, pt: &POINTL, e: *mut DROPEFFECT) -> Result<()> {
             if super::desk::dragging() {
                 // desktop icons dropped back on the desktop: a move of the icons, not of the files (the dragger finishes it)
@@ -1224,20 +1609,33 @@ mod sh {
                 unsafe { *e = DROPEFFECT_NONE };
                 return Ok(());
             }
+            super::ui::set_drop_row(-1);
+            TAB_HOVER.set(None);
             let paths = hdrop_paths(o.ok()?)?;
-            let to = super::cur_dir();
-            // like Explorer: same drive moves, other drive copies, Ctrl forces copy
-            let copy = k.0 & 8 != 0 || paths.first().and_then(|p| p.components().next()) != to.components().next();
-            unsafe { *e = if copy { DROPEFFECT_COPY } else { DROPEFFECT_MOVE } };
-            let _ = fileop(self.main as *mut c_void, if copy { Op::Copy } else { Op::Move }, &paths, &to);
-            unsafe { let _ = PostMessageW(Some(HWND(self.main as *mut c_void)), WM_APP, WPARAM(0), LPARAM(0)); }
+            let to = if self.tabs {
+                match tab_target(pt) { Some((_, p)) => p, None => { unsafe { *e = DROPEFFECT_NONE }; return Ok(()) } }
+            } else if super::desk() { super::cur_dir() } else { target(pt).0 };
+            // like Explorer: same drive moves, other drive copies, Ctrl forces copy; into where it already is: nothing
+            let fx = drop_effect(&paths, &to, k);
+            unsafe { *e = fx };
+            if fx == DROPEFFECT_NONE { return Ok(()); }
+            let _ = fileop(self.main as *mut c_void, if fx == DROPEFFECT_COPY { Op::Copy } else { Op::Move }, &paths, &to);
+            // the desktop lays its icons out again; a folder window follows the change by itself (watch)
+            if super::desk() { unsafe { let _ = PostMessageW(Some(HWND(self.main as *mut c_void)), WM_APP, WPARAM(0), LPARAM(0)); } }
             Ok(())
         }
     }
 
     pub fn register_drop(list: *mut c_void, main: isize) -> Result<()> {
-        let t: IDropTarget = DropT { main }.into();
+        let t: IDropTarget = DropT { main, paths: RefCell::new(vec![]), tabs: false }.into();
         unsafe { RegisterDragDrop(HWND(list), &t) }
+    }
+
+    /// The tab row takes drops too: onto a tab goes into its folder, and resting on one opens it. On the toolbar and
+    /// on the window itself (the title row lets the pointer through to it, for moving the window).
+    pub fn register_tab_drop(wnd: *mut c_void, main: isize) -> Result<()> {
+        let t: IDropTarget = DropT { main, paths: RefCell::new(vec![]), tabs: true }.into();
+        unsafe { RegisterDragDrop(HWND(wnd), &t) }
     }
 }
 
@@ -1547,7 +1945,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                     let pop = CreateWindowExW(0, w("RxZoomPop").as_ptr(), ptr::null(), float, 0, 0, 0, 0, h, 0 as _, inst, ptr::null());
                     ui::overlays_set(fbar, sbar, pop);
                     let fe = CreateWindowExW(0, w("EDIT").as_ptr(), ptr::null(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL as u32, 0, 0, 0, 0, fbar, 0 as _, inst, ptr::null());
-                    put(fe, WM_SETFONT, ui::font(14, 400, ui::ui_face()) as usize, 1);
+                    put(fe, WM_SETFONT, ui::font(12, 400, ui::ui_face()) as usize, 1);
                     FILT_OLD.store(SetWindowLongPtrW(fe, GWLP_WNDPROC, filter_proc as *const () as isize), Relaxed);
                     FILT.with_borrow_mut(|f| f.edit = fe as isize);
                     filter_cue();
@@ -1601,6 +1999,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                 ST.with_borrow_mut(|st| { st.list = list; st.tab = tab; st.edit = edit; st.tabs = tabs; st.active = active; });
                 if !desk() { ui::place_edit(tab); }
                 let _ = sh::register_drop(list as _, h as isize);
+                if !desk() { let _ = sh::register_tab_drop(tab as _, h as isize); let _ = sh::register_tab_drop(h as _, h as isize); }
                 // live wallpaper: the list is see-through (colour key), so over empty desktop OLE finds the wallpaper window under it,
                 // and walks up from there to the desktop window: it must accept the drop too
                 if desk() { let _ = sh::register_drop(h as _, h as isize); }
@@ -1618,6 +2017,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                 }
                 0
             }
+            WM_ACTIVATEAPP if wp == 0 => { ui::zoom_pop_hide(); DefWindowProcW(h, m, wp, lp) } // another app came forward
             WM_SIZE => {
                 let list = ST.with_borrow(|st| st.list);
                 let (cw, ch) = ((lp & 0xFFFF) as i32, ((lp >> 16) & 0xFFFF) as i32);
@@ -1643,15 +2043,24 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                     10 => opts::open(h),
                     11 => toggle_mark(h, cur_dir()),
                     // a place in the side pane: a folder opens here, a recent file with its program
-                    20 => { if let Some((p, _)) = ui::nav_item(lp as usize) { if p.is_dir() { load(h, p) } else { open_file(&p) } } }
+                    20 => { if let Some((p, _)) = ui::nav_item(lp as usize) { if p.as_os_str() == ui::RECYCLE_BIN { open_shell_place(&p) } else if p.is_dir() { load(h, p) } else { open_file(&p) } } }
                     21 => { if let Some(p) = ui::crumb_path(lp as usize) { load(h, p); } } // a part of the path in the address pill
                     22 => nav_menu(h, lp as usize),
-                    23 => { if let Some((p, _)) = ui::nav_item(lp as usize) { open_in_new_tab(h, p); } } // middle click
+                    23 => { if let Some((p, _)) = ui::nav_item(lp as usize) { if p.as_os_str() == ui::RECYCLE_BIN { open_shell_place(&p) } else { open_in_new_tab(h, p); } } } // middle click
+                    30 => {
+                        // the side pane's button: hides or shows the pane, the tabs move along
+                        set_prefs(h, |p| p.side_pane = !p.side_pane, false);
+                        let mut r: RECT = std::mem::zeroed();
+                        GetClientRect(h, &mut r);
+                        ui::layout_children(r.right, r.bottom);
+                        InvalidateRect(h, ptr::null(), 0);
+                    }
                     24 => set_prefs(h, |p| { let s = lp as u8; if let Some(i) = p.collapsed.iter().position(|&c| c == s) { p.collapsed.remove(i); } else { p.collapsed.push(s); } }, false),
                     25 => zoom_by(h, lp as i32), // Ctrl+wheel over the list: lp = steps (+ bigger)
                     26 => tree_toggle(h, lp as usize), // the arrow of a folder in the tree
                     27 => toggle_sub(h), // the "Subfolders" glyph in the filter bar
                     28 => set_zoom(h, lp as usize, true), // a step picked on the zoom slider
+                    29 => bg_menu(h), // right click on the empty rows at the end
                     _ => {}
                 }
                 0
@@ -1749,7 +2158,19 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                 let list = ST.with_borrow(|st| st.list);
                 match nm.code {
                     NM_CUSTOMDRAW if nm.hwndFrom == list && !desk() => return ui::list_draw(lp), // the rows are painted by hand
-                    LVN_ITEMCHANGED | LVN_ODSTATECHANGED => ui::status_dirty(h), // selection count in the status line
+                    LVN_ITEMCHANGED | LVN_ODSTATECHANGED => {
+                        // the empty rows at the end are only room: a selection that reaches them goes back to the last row
+                        let n = ST.with_borrow(|st| st.rows.len());
+                        let (from, to) = if nm.code == LVN_ITEMCHANGED { let i = (*(lp as *const NMLISTVIEW)).iItem; (i, i) } else { let o = &*(lp as *const NMLVODSTATECHANGE); (o.iFrom, o.iTo) };
+                        if !desk() && n > 0 && to >= n as i32 {
+                            let mut it: LVITEMW = std::mem::zeroed();
+                            it.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+                            for k in (from.max(n as i32))..=to { put(list, LVM_SETITEMSTATE, k as usize, &it as *const _ as isize); }
+                            let f = put(list, LVM_GETNEXTITEM, usize::MAX, LVNI_FOCUSED as isize);
+                            if f < 0 || f >= n as isize { it.state = LVIS_SELECTED | LVIS_FOCUSED; put(list, LVM_SETITEMSTATE, n - 1, &it as *const _ as isize); }
+                        }
+                        ui::status_dirty(h); // selection count in the status line
+                    }
                     LVN_GETDISPINFOW => {
                         let it = &mut (*(lp as *mut NMLVDISPINFOW)).item;
                         // a request that arrives while ST is borrowed is skipped; the list repaints later
@@ -1778,13 +2199,15 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                     }
                     NM_RCLICK if nm.hwndFrom == list => {
                         let (_, _, paths) = selected();
-                        if !paths.is_empty() { let _ = sh::show(h, &paths); reload(h); } else { bg_menu(h); }
+                        if !paths.is_empty() { menu_choice(h, sh::show(h, &paths).unwrap_or(sh::Choice::Done), &paths); } else { bg_menu(h); }
                     }
                     LVN_COLUMNCLICK => {
                         let c = (*(lp as *const NMLISTVIEW)).iSubItem as usize;
                         let asc = if SORT_COL.load(Relaxed) == c { !SORT_ASC.load(Relaxed) } else { true };
                         SORT_COL.store(c, Relaxed);
                         SORT_ASC.store(asc, Relaxed);
+                        // the whole header again: the column sorted before must lose its mark (only the clicked one was redrawn)
+                        InvalidateRect(put(ST.with_borrow(|st| st.list), LVM_GETHEADER, 0, 0) as HWND, ptr::null(), 0);
                         if !desk() { set_prefs(h, |p| { p.sort_col = c; p.sort_asc = asc; }, false); }
                         let n = ST.with_borrow_mut(|st| {
                             // folder totals counted so far take part in the sort
@@ -1809,7 +2232,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                             // dropped on the desktop itself: the icons were moved (or went into a folder icon), no reload needed
                             let handled = desk() && desk::drag_end(h, list);
                             drag_log(&format!("moved on the desktop: {handled}"));
-                            if !handled { reload(h); }
+                            if !handled && desk() { reload(h); } // the folder window follows changes by itself (watch)
                         }
                     }
                     LVN_KEYDOWN => {
@@ -1855,20 +2278,25 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                         }
                         match vk {
                             0x08 => if let Some(p) = dir.parent() { load(h, p.to_path_buf()) },
-                            0x2E if !paths.is_empty() => { let _ = sh::fileop(h, sh::Op::Delete, &paths, &dir); }
+                            0x2E if !paths.is_empty() => { let _ = sh::fileop(h, if shift { sh::Op::Purge } else { sh::Op::Delete }, &paths, &dir); } // Shift+Del: for good
+                            0x5A if ctrl => { if !sh::undo(h) { return 0; } } // Ctrl+Z: the last copy / move / delete / rename / new item back
+                            0x41 if ctrl => { select_all(list); return 0; } // Ctrl+A
+                            0x1B => { // Esc: nothing selected
+                                put(list, LVM_SETITEMSTATE, usize::MAX, &LVITEMW { stateMask: LVIS_SELECTED, ..std::mem::zeroed() } as *const _ as isize);
+                                return 0;
+                            }
+                            0x43 if ctrl && shift && !paths.is_empty() => { copy_paths(h, &paths); return 0; } // Ctrl+Shift+C: the paths as text
+                            0x52 if ctrl => {} // Ctrl+R: reload, like F5
                             // Space on a picture: a quick look in photoview (pictures only: videos and text are not previewed yet)
                             0x20 if !desk() => if let (Some(p), Some(exe)) = (paths.first().filter(|p| is_pic(p)), tool("photoview")) { let _ = std::process::Command::new(exe).arg(p).spawn(); },
-                            0x71 => {
-                                let i = put(list, LVM_GETNEXTITEM, usize::MAX, LVNI_SELECTED as isize);
-                                if i >= 0 { put(list, LVM_EDITLABELW, i as usize, 0); }
-                            }
+                            0x71 => { rename_selected(); return 0; }
                             0x73 | 0x4C if vk == 0x73 || ctrl => { // F4 / Ctrl+L: address bar
                                 let edit = ST.with_borrow(|st| st.edit);
                                 SetFocus(edit);
                                 put(edit, EM_SETSEL, 0, -1);
                                 return 0;
                             }
-                            0x5D if !paths.is_empty() => { let _ = sh::show(h, &paths); }
+                            0x5D if !paths.is_empty() => { menu_choice(h, sh::show(h, &paths).unwrap_or(sh::Choice::Done), &paths); return 0; }
                             0x43 | 0x58 if ctrl && !paths.is_empty() => { let _ = sh::clip_set(h, &paths, vk == 0x58); return 0; }
                             0x56 if ctrl => paste(h, &dir),
                             0x4E if ctrl => new_entry(&dir, "New folder", true),
@@ -1877,14 +2305,26 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                             0x4D if ctrl => { toggle_view(h); return 0; } // Ctrl+M: details <-> thumbnails
                             0x54 if ctrl => tab_new(),
                             0x57 if ctrl => { tab_close(h); return 0; }
-                            0x09 if ctrl => {
-                                let next = ST.with_borrow(|st| (st.active + 1) % st.tabs.len());
+                            0x09 if ctrl => { // Ctrl+Tab / Ctrl+Shift+Tab: next / previous tab
+                                let next = ST.with_borrow(|st| if shift { (st.active + st.tabs.len() - 1) % st.tabs.len() } else { (st.active + 1) % st.tabs.len() });
                                 tab_select(h, next);
+                                return 0;
+                            }
+                            0x31..=0x39 if ctrl && !desk() => { // Ctrl+1..9: that tab (9: the last one)
+                                let n = ST.with_borrow(|st| st.tabs.len());
+                                let i = if vk == 0x39 { n - 1 } else { (vk - 0x31) as usize };
+                                if i < n { tab_select(h, i); }
                                 return 0;
                             }
                             _ => return 0,
                         }
                         reload(h);
+                    }
+                    LVN_BEGINLABELEDITW => {
+                        // the box over the drawn name (the list would put it over the icon)
+                        let (list, i) = (ST.with_borrow(|st| st.list), (*(lp as *const NMLVDISPINFOW)).item.iItem);
+                        if let Ok(i) = usize::try_from(i) { ui::label_edit_fit(list, put(list, LVM_GETEDITCONTROL, 0, 0) as HWND, i); }
+                        return 0;
                     }
                     LVN_ENDLABELEDITW => {
                         let it = &(*(lp as *const NMLVDISPINFOW)).item;
@@ -1893,7 +2333,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                             // reject separators so a rename can never move the item
                             if !new.is_empty() && !new.contains(['\\', '/', ':']) {
                                 // next to the old name: a subfolder hit is renamed in its own folder
-                                ST.with_borrow(|st| if let Some(r) = usize::try_from(it.iItem).ok().and_then(|i| st.rows.get(i)) { let old = st.dir.join(&r.name); let _ = fs::rename(&old, old.with_file_name(&new)); });
+                                ST.with_borrow(|st| if let Some(r) = usize::try_from(it.iItem).ok().and_then(|i| st.rows.get(i)) { let old = st.dir.join(&r.name); let to = old.with_file_name(&new); if old != to && fs::rename(&old, &to).is_ok() { sh::push_undo(sh::Undo::Renamed(to, old)); } });
                                 PostMessageW(h, WM_APP, 0, 0); // reload after the edit control is gone
                             }
                         }
@@ -1959,6 +2399,8 @@ fn main() {
         let bg = if desktop { GetStockObject(BLACK_BRUSH) as _ } else { windows_sys::Win32::Graphics::Gdi::CreateSolidBrush(ui::pal().bg) };
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(ui::proc), hInstance: inst, lpszClassName: w("RxChrome").as_ptr(), hCursor: LoadCursorW(0 as _, IDC_ARROW), ..std::mem::zeroed() });
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(ui::nav_proc), hInstance: inst, lpszClassName: w("RxNav").as_ptr(), hCursor: LoadCursorW(0 as _, IDC_ARROW), ..std::mem::zeroed() });
+        // the menu's windows cast a shadow (CS_DROPSHADOW)
+        RegisterClassW(&WNDCLASSW { style: 0x0002_0000, lpfnWndProc: Some(menu::proc), hInstance: inst, lpszClassName: w(menu::CLASS).as_ptr(), hCursor: LoadCursorW(0 as _, IDC_ARROW), ..std::mem::zeroed() });
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(opts::proc), hInstance: inst, lpszClassName: w(opts::CLASS).as_ptr(), hCursor: LoadCursorW(0 as _, IDC_ARROW), ..std::mem::zeroed() });
         for (name, f) in [("RxFilter", ui::filter_bar_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT), ("RxStatus", ui::status_bar_proc), ("RxZoomPop", ui::zoom_pop_proc)] {
             RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(f), hInstance: inst, lpszClassName: w(name).as_ptr(), hCursor: LoadCursorW(0 as _, IDC_ARROW), ..std::mem::zeroed() });
@@ -1989,7 +2431,8 @@ fn main() {
             }
             // a click anywhere else lets go of the address box (the side pane and the toolbar never take the focus
             // themselves, so it used to stay there); a click on the box itself puts it back right after
-            if !desk() && matches!(msg.message, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_NCLBUTTONDOWN) {
+            if !desk() && matches!(msg.message, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_NCLBUTTONDOWN | WM_NCRBUTTONDOWN) {
+                ui::zoom_pop_click(msg.hwnd);
                 let (edit, list) = ST.with(|c| c.try_borrow().map(|s| (s.edit, s.list)).unwrap_or((0 as _, 0 as _)));
                 if !edit.is_null() && GetFocus() == edit && msg.hwnd != edit { SetFocus(list); }
             }

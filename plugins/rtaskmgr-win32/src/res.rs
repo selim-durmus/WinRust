@@ -131,9 +131,9 @@ mod tests {
     #[test]
     fn reads_description_and_icon_of_a_system_file() {
         let r = load(r"C:\Windows\System32\notepad.exe");
-        assert!(!r.desc.is_empty(), "описание файла должно читаться");
+        assert!(!r.desc.is_empty(), "the file description must be readable");
         assert!(r.company.to_lowercase().contains("microsoft"));
-        assert_ne!(r.icon, 0, "иконка должна извлекаться");
+        assert_ne!(r.icon, 0, "the icon must be extracted");
     }
 
     #[test]

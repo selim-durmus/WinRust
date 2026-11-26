@@ -139,7 +139,7 @@ fn locations() -> Vec<(String, String)> {
             if prop(0 /*SPDRP_DEVICEDESC*/, &mut desc) && prop(0x10 /*SPDRP_BUSNUMBER*/, &mut bus) && prop(0x1C /*SPDRP_ADDRESS*/, &mut addr) {
                 let w: Vec<u16> = desc.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
                 let (b, a) = (u32::from_le_bytes(bus), u32::from_le_bytes(addr));
-                out.push((String::from_utf16_lossy(&w), tf!("PCI-шина {b}, устройство {}, функция {}", "PCI bus {b}, device {}, function {}", (a >> 16) & 0xFFFF, a & 0xFFFF)));
+                out.push((String::from_utf16_lossy(&w), format!("PCI bus {b}, device {}, function {}", (a >> 16) & 0xFFFF, a & 0xFFFF)));
             }
         }
         SetupDiDestroyDeviceInfoList(set);
@@ -201,15 +201,15 @@ mod tests {
             return; // GitHub's VMs have no GPU (DXGI lists no adapter)
         }
         let a = adapters();
-        assert!(!a.is_empty(), "DXGI должен вернуть хотя бы один адаптер");
+        assert!(!a.is_empty(), "DXGI must return at least one adapter");
         for g in &a {
             eprintln!("{g:?} temp={:?}", temperature(g.luid));
             assert!(!g.name.is_empty() && g.dx.starts_with("DirectX"), "{g:?}");
         }
-        let nv = a.iter().find(|g| g.vendor == 0x10DE).expect("есть NVIDIA");
-        assert!(nv.dedicated > 4 << 30, "выделенная память: {}", nv.dedicated);
-        assert!(nv.location.contains("PCI"), "расположение: {:?}", nv.location);
-        let t = temperature(nv.luid).expect("температура через D3DKMT");
+        let nv = a.iter().find(|g| g.vendor == 0x10DE).expect("an NVIDIA GPU");
+        assert!(nv.dedicated > 4 << 30, "dedicated memory: {}", nv.dedicated);
+        assert!(nv.location.contains("PCI"), "location: {:?}", nv.location);
+        let t = temperature(nv.luid).expect("temperature through D3DKMT");
         assert!((15.0..=110.0).contains(&t), "t={t}");
     }
 }

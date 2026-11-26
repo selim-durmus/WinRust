@@ -333,7 +333,7 @@ pub fn heat(th: &Theme, value: f64, scale: f64) -> Rgb {
 /// Человекочитаемые единицы.
 pub fn fmt_mem(bytes: u64) -> String {
     let mb = bytes as f64 / 1_048_576.0;
-    if mb >= 1000.0 { tf!("{} МБ", "{} MB", group_thousands(mb as u64)) } else if mb >= 100.0 { tf!("{:.0} МБ", "{:.0} MB", mb) } else { tf!("{:.1} МБ", "{:.1} MB", mb) }
+    if mb >= 1000.0 { format!("{} MB", group_thousands(mb as u64)) } else if mb >= 100.0 { format!("{:.0} MB", mb) } else { format!("{:.1} MB", mb) }
 }
 
 pub fn group_thousands(n: u64) -> String {
@@ -363,7 +363,7 @@ mod tests {
     fn formats() {
         assert_eq!(group_thousands(3572), "3,572");
         assert_eq!(group_thousands(12), "12");
-        assert_eq!(fmt_mem(3_746_000_000), "3,572 МБ");
+        assert_eq!(fmt_mem(3_746_000_000), "3,572 MB");
         assert_eq!(fmt_uptime(2 * 86400 + 18 * 3600 + 27 * 60 + 54), "2:18:27:54");
     }
 

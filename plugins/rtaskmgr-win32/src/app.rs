@@ -158,12 +158,12 @@ fn wide(s: &str) -> Vec<u16> {
 
 fn page_buttons(p: Page) -> Vec<(Btn, &'static str, char)> {
     match p {
-        Page::Processes => vec![(Btn::RunTask, t!("Запустить новую задачу", "Run new task"), '\u{E710}'), (Btn::EndTask, t!("Снять задачу", "End task"), '\u{E711}'), (Btn::Efficiency, t!("Режим эффективности", "Efficiency mode"), '\u{E945}'), (Btn::More, "", '\u{E712}')],
-        Page::Users => vec![(Btn::EndTask, t!("Снять задачу", "End task"), '\u{E711}'), (Btn::More, "", '\u{E712}')],
-        Page::Details => vec![(Btn::RunTask, t!("Запустить новую задачу", "Run new task"), '\u{E710}'), (Btn::EndTask, t!("Снять задачу", "End task"), '\u{E711}'), (Btn::More, "", '\u{E712}')],
-        Page::Services => vec![(Btn::SvcStart, t!("Запустить", "Start"), '\u{E768}'), (Btn::SvcStop, t!("Остановить", "Stop"), '\u{E71A}'), (Btn::More, "", '\u{E712}')],
-        Page::Startup => vec![(Btn::StartEnable, t!("Включить", "Enable"), '\u{E73E}'), (Btn::StartDisable, t!("Отключить", "Disable"), '\u{E711}'), (Btn::More, "", '\u{E712}')],
-        Page::Rules => vec![(Btn::RuleDelete, t!("Удалить правило", "Delete rule"), '\u{E74D}'), (Btn::More, "", '\u{E712}')],
+        Page::Processes => vec![(Btn::RunTask, "Run new task", '\u{E710}'), (Btn::EndTask, "End task", '\u{E711}'), (Btn::Efficiency, "Efficiency mode", '\u{E945}'), (Btn::More, "", '\u{E712}')],
+        Page::Users => vec![(Btn::EndTask, "End task", '\u{E711}'), (Btn::More, "", '\u{E712}')],
+        Page::Details => vec![(Btn::RunTask, "Run new task", '\u{E710}'), (Btn::EndTask, "End task", '\u{E711}'), (Btn::More, "", '\u{E712}')],
+        Page::Services => vec![(Btn::SvcStart, "Start", '\u{E768}'), (Btn::SvcStop, "Stop", '\u{E71A}'), (Btn::More, "", '\u{E712}')],
+        Page::Startup => vec![(Btn::StartEnable, "Enable", '\u{E73E}'), (Btn::StartDisable, "Disable", '\u{E711}'), (Btn::More, "", '\u{E712}')],
+        Page::Rules => vec![(Btn::RuleDelete, "Delete rule", '\u{E74D}'), (Btn::More, "", '\u{E712}')],
         Page::History => vec![(Btn::More, "", '\u{E712}')],
         _ => vec![],
     }
@@ -706,7 +706,7 @@ impl App {
         if !notes.is_empty() {
             let msg = notes.join("; ");
             self.toast(&msg);
-            self.tray.show(&msg, Some(t!("Диспетчер задач", "Task Manager")), None, None);
+            self.tray.show(&msg, Some("Task Manager"), None, None);
         }
         {
             let (page, ticks) = (self.ui.borrow().page, self.data.borrow().ticks);
@@ -797,30 +797,30 @@ impl App {
                 let mut v = vec![];
                 if let Some(r) = self.selected_row()
                     && r.expandable {
-                        v.push(MI::Item(if r.expanded { t!("Свернуть", "Collapse") } else { t!("Развернуть", "Expand") }, Act::Toggle));
+                        v.push(MI::Item(if r.expanded { "Collapse" } else { "Expand" }, Act::Toggle));
                         v.push(MI::Sep);
                     }
                 v.extend([
-                    MI::Item(t!("Снять задачу", "End task"), Act::EndTask),
-                    MI::Item(t!("Завершить дерево процессов", "End process tree"), Act::EndTree),
-                    MI::Item(t!("Режим эффективности", "Efficiency mode"), Act::Efficiency),
-                    MI::Item(t!("Приостановить", "Suspend"), Act::Suspend(true)),
-                    MI::Item(t!("Возобновить", "Resume"), Act::Suspend(false)),
+                    MI::Item("End task", Act::EndTask),
+                    MI::Item("End process tree", Act::EndTree),
+                    MI::Item("Efficiency mode", Act::Efficiency),
+                    MI::Item("Suspend", Act::Suspend(true)),
+                    MI::Item("Resume", Act::Suspend(false)),
                     MI::Sep,
-                    MI::Sub(t!("Приоритет", "Priority"), sys::PRIORITIES.iter().map(|p| MI::Item(p.0, Act::Prio(p.1))).collect()),
-                    MI::Sub(t!("Ядра процессора", "CPU cores"), vec![MI::Item(t!("Все ядра", "All cores"), Act::Affinity(false)), MI::Item(t!("Только половина ядер", "Half of the cores only"), Act::Affinity(true))]),
+                    MI::Sub("Priority", sys::PRIORITIES.iter().map(|p| MI::Item(p.0, Act::Prio(p.1))).collect()),
+                    MI::Sub("CPU cores", vec![MI::Item("All cores", Act::Affinity(false)), MI::Item("Half of the cores only", Act::Affinity(true))]),
                     MI::Sep,
-                    MI::Item(t!("Открыть расположение файла", "Open file location"), Act::OpenDir),
-                    MI::Item(t!("Копировать командную строку", "Copy command line"), Act::CopyCmd),
+                    MI::Item("Open file location", Act::OpenDir),
+                    MI::Item("Copy command line", Act::CopyCmd),
                     MI::Sep,
-                    MI::Item(t!("Правило: понижать приоритет при ЦП > 25% дольше 60 с", "Rule: lower priority when CPU > 25% for over 60 s"), Act::RuleLower),
-                    MI::Item(t!("Правило: уведомлять при ЦП > 25% дольше 60 с", "Rule: notify when CPU > 25% for over 60 s"), Act::RuleNotify),
+                    MI::Item("Rule: lower priority when CPU > 25% for over 60 s", Act::RuleLower),
+                    MI::Item("Rule: notify when CPU > 25% for over 60 s", Act::RuleNotify),
                 ]);
                 v
             }
-            Page::Services => vec![MI::Item(t!("Запустить службу", "Start service"), Act::SvcStart), MI::Item(t!("Остановить службу", "Stop service"), Act::SvcStop)],
-            Page::Startup => vec![MI::Item(t!("Включить", "Enable"), Act::StartEnable), MI::Item(t!("Отключить", "Disable"), Act::StartDisable), MI::Sep, MI::Item(t!("Открыть расположение файла", "Open file location"), Act::OpenDir)],
-            Page::Rules => vec![MI::Item(t!("Удалить правило", "Delete rule"), Act::RuleDelete)],
+            Page::Services => vec![MI::Item("Start service", Act::SvcStart), MI::Item("Stop service", Act::SvcStop)],
+            Page::Startup => vec![MI::Item("Enable", Act::StartEnable), MI::Item("Disable", Act::StartDisable), MI::Sep, MI::Item("Open file location", Act::OpenDir)],
+            Page::Rules => vec![MI::Item("Delete rule", Act::RuleDelete)],
             _ => vec![],
         }
     }
@@ -828,30 +828,30 @@ impl App {
     fn more_menu(&self) -> Vec<MI> {
         let d = self.data.borrow();
         vec![
-            MI::Item(t!("Запустить новую задачу", "Run new task"), Act::RunTask),
-            MI::Item(t!("Экспорт в CSV", "Export to CSV"), Act::Export),
+            MI::Item("Run new task", Act::RunTask),
+            MI::Item("Export to CSV", Act::Export),
             MI::Sep,
-            MI::Sub(t!("Тема", "Theme"), vec![MI::Check(t!("Светлая", "Light"), Act::SetTheme(0), d.cfg.theme == 0), MI::Check(t!("Тёмная", "Dark"), Act::SetTheme(1), d.cfg.theme == 1), MI::Check(t!("Системная", "System"), Act::SetTheme(2), d.cfg.theme == 2)]),
-            MI::Item(t!("Параметры", "Settings"), Act::Go(Page::Settings)),
+            MI::Sub("Theme", vec![MI::Check("Light", Act::SetTheme(0), d.cfg.theme == 0), MI::Check("Dark", Act::SetTheme(1), d.cfg.theme == 1), MI::Check("System", Act::SetTheme(2), d.cfg.theme == 2)]),
+            MI::Item("Settings", Act::Go(Page::Settings)),
         ]
         .into_iter()
-        .chain((!d.is_admin).then_some([MI::Sep, MI::Item(t!("Перезапустить от имени администратора", "Restart as administrator"), Act::RelaunchAdmin)]).into_iter().flatten())
+        .chain((!d.is_admin).then_some([MI::Sep, MI::Item("Restart as administrator", Act::RelaunchAdmin)]).into_iter().flatten())
         .collect()
     }
 
     pub fn tray_menu(&self) -> Vec<MI> {
         let d = self.data.borrow();
         vec![
-            MI::Item(t!("Показать окно", "Show window"), Act::ShowWindow),
+            MI::Item("Show window", Act::ShowWindow),
             MI::Sep,
-            MI::Check(t!("Закрытие окна сворачивает в трей", "Closing the window minimizes to tray"), Act::ToggleTray, d.cfg.to_tray),
-            MI::Check(t!("Запускать при входе в Windows", "Start with Windows"), Act::ToggleAutostart, startup::self_autostart()),
-            MI::Check(t!("Сеть по процессам (ETW, администратор)", "Per-process network (ETW, administrator)"), Act::ToggleEtw, d.etw.is_some()),
+            MI::Check("Closing the window minimizes to tray", Act::ToggleTray, d.cfg.to_tray),
+            MI::Check("Start with Windows", Act::ToggleAutostart, startup::self_autostart()),
+            MI::Check("Per-process network (ETW, administrator)", Act::ToggleEtw, d.etw.is_some()),
             MI::Sep,
         ]
         .into_iter()
-        .chain((!d.is_admin).then_some(MI::Item(t!("Перезапустить от имени администратора", "Restart as administrator"), Act::RelaunchAdmin)))
-        .chain([MI::Item(t!("Выход", "Exit"), Act::Exit)])
+        .chain((!d.is_admin).then_some(MI::Item("Restart as administrator", Act::RelaunchAdmin)))
+        .chain([MI::Item("Exit", Act::Exit)])
         .collect()
     }
 
@@ -880,7 +880,7 @@ impl App {
                 if sys::relaunch_as_admin("") {
                     return self.quit();
                 }
-                return self.toast(t!("Запуск от имени администратора отменён", "Running as administrator was cancelled"));
+                return self.toast("Running as administrator was cancelled");
             }
             Act::Go(p) => return self.go_page(p),
             Act::RunTask => {
@@ -900,7 +900,7 @@ impl App {
                     d.cfg.to_tray = !d.cfg.to_tray;
                     d.cfg.to_tray
                 };
-                self.toast(if on { t!("Закрытие окна будет сворачивать в трей", "Closing the window will minimize to tray") } else { t!("Закрытие окна завершит программу", "Closing the window will quit the program") });
+                self.toast(if on { "Closing the window will minimize to tray" } else { "Closing the window will quit the program" });
                 self.save_settings();
                 return;
             }
@@ -909,9 +909,9 @@ impl App {
                 let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
                 let ok = startup::set_self_autostart(want, &exe);
                 self.toast(match (ok, startup::self_autostart()) {
-                    (true, true) => t!("Программа будет запускаться при входе в Windows (сразу в трей)", "The program will start with Windows (straight to the tray)"),
-                    (true, false) => t!("Автозапуск программы отключён", "Autostart is disabled"),
-                    _ => t!("Не удалось изменить автозапуск", "Could not change autostart"),
+                    (true, true) => "The program will start with Windows (straight to the tray)",
+                    (true, false) => "Autostart is disabled",
+                    _ => "Could not change autostart",
                 });
                 return;
             }
@@ -919,16 +919,16 @@ impl App {
                 let msg = {
                     let mut d = self.data.borrow_mut();
                     if !d.is_admin {
-                        t!("Сеть по процессам требует прав администратора — запустите программу от имени администратора", "Per-process network needs administrator rights - run the program as administrator").to_string()
+                        "Per-process network needs administrator rights - run the program as administrator".to_string()
                     } else if let Some(s) = d.etw.take() {
                         crate::net::stop(s);
                         d.net.clear();
                         d.cfg.etw = false;
-                        t!("Сеть по процессам выключена", "Per-process network is off").into()
+                        "Per-process network is off".into()
                     } else {
                         d.etw = crate::net::start();
                         d.cfg.etw = d.etw.is_some();
-                        if d.etw.is_some() { t!("Сеть по процессам включена (колонка «Сеть»)", "Per-process network is on ('Network' column)").into() } else { t!("Не удалось запустить ETW", "Could not start ETW").into() }
+                        if d.etw.is_some() { "Per-process network is on ('Network' column)".into() } else { "Could not start ETW".into() }
                     }
                 };
                 self.toast(&msg);
@@ -941,7 +941,7 @@ impl App {
                     d.cfg.gpu_temp_always = !d.cfg.gpu_temp_always;
                     d.cfg.gpu_temp_always
                 };
-                self.toast(if on { t!("Температура GPU читается постоянно", "GPU temperature is read continuously") } else { t!("Температура GPU читается только на странице GPU", "GPU temperature is read only on the GPU page") });
+                self.toast(if on { "GPU temperature is read continuously" } else { "GPU temperature is read only on the GPU page" });
                 self.save_settings();
                 return;
             }
@@ -950,7 +950,7 @@ impl App {
         }
         let page = self.ui.borrow().page;
         let Some(row) = self.selected_row() else {
-            self.toast(t!("Сначала выберите строку в списке", "Select a row in the list first"));
+            self.toast("Select a row in the list first");
             return;
         };
         if act == Act::Toggle {
@@ -968,7 +968,7 @@ impl App {
                         }
                     }
                     self.save_settings();
-                    self.toast(t!("Правило удалено", "Rule deleted"));
+                    self.toast("Rule deleted");
                     self.rebuild();
                 }
                 return;
@@ -989,24 +989,24 @@ impl App {
             pids.retain(|&p| d.sys.process(sysinfo::Pid::from_u32(p)).is_none_or(|x| !CRITICAL.contains(&x.name().to_string_lossy().to_lowercase().as_str())));
             if pids.len() < total {
                 drop(d);
-                self.toast(t!("Критичные системные процессы (csrss, lsass, smss и т.п.) защищены и пропущены", "Critical system processes (csrss, lsass, smss, etc.) are protected and skipped"));
+                self.toast("Critical system processes (csrss, lsass, smss, etc.) are protected and skipped");
                 if pids.is_empty() {
                     return;
                 }
             }
         }
-        if (act == Act::EndTask && pids.len() > 1 || act == Act::EndTree) && !self.confirm(&tf!("Завершить процессов: {} (для дерева — вместе с потомками)?", "End {} processes (for a tree, together with their children)?", pids.len())) {
+        if (act == Act::EndTask && pids.len() > 1 || act == Act::EndTree) && !self.confirm(&format!("End {} processes (for a tree, together with their children)?", pids.len())) {
             return;
         }
         let report = |what: &str, ok: usize| {
-            self.toast(&if ok == pids.len() { tf!("{what}: готово ({ok})", "{what}: done ({ok})") } else { tf!("{what}: удалось {ok} из {} — для остальных нужны права администратора{}", "{what}: {ok} of {} succeeded - the rest need administrator rights{}", pids.len(), if self.data.borrow().is_admin { "" } else { t!(" (меню «…» → «Перезапустить от имени администратора»)", " (menu '…' → 'Restart as administrator')") }) });
+            self.toast(&if ok == pids.len() { format!("{what}: done ({ok})") } else { format!("{what}: {ok} of {} succeeded - the rest need administrator rights{}", pids.len(), if self.data.borrow().is_admin { "" } else { " (menu '…' → 'Restart as administrator')" }) });
         };
         match act {
             Act::EndTask => {
                 let d = self.data.borrow();
                 let ok = pids.iter().filter(|&&p| d.sys.process(sysinfo::Pid::from_u32(p)).is_some_and(|x| x.kill())).count();
                 drop(d);
-                report(t!("Завершение", "Ending"), ok);
+                report("Ending", ok);
             }
             Act::EndTree => {
                 let d = self.data.borrow();
@@ -1014,9 +1014,9 @@ impl App {
                 let all = descendants(&parents, &pids);
                 let ok = all.iter().filter(|&&p| d.sys.process(sysinfo::Pid::from_u32(p)).is_some_and(|x| x.kill())).count();
                 drop(d);
-                self.toast(&tf!("Завершено {ok} из {} (с потомками)", "Ended {ok} of {} (with children)", all.len()));
+                self.toast(&format!("Ended {ok} of {} (with children)", all.len()));
             }
-            Act::Prio(c) => report(t!("Приоритет", "Priority"), pids.iter().filter(|&&p| sys::set_priority(p, c)).count()),
+            Act::Prio(c) => report("Priority", pids.iter().filter(|&&p| sys::set_priority(p, c)).count()),
             Act::Suspend(on) => {
                 let ok: Vec<u32> = pids.iter().copied().filter(|&p| sys::suspend(p, on)).collect();
                 {
@@ -1025,7 +1025,7 @@ impl App {
                         if on { d.suspended.insert(*p) } else { d.suspended.remove(p) };
                     }
                 }
-                report(if on { t!("Приостановка", "Suspending") } else { t!("Возобновление", "Resuming") }, ok.len());
+                report(if on { "Suspending" } else { "Resuming" }, ok.len());
             }
             Act::Efficiency => {
                 let on = !pids.iter().all(|p| self.data.borrow().efficiency.contains(p));
@@ -1036,9 +1036,9 @@ impl App {
                         if on { d.efficiency.insert(*p) } else { d.efficiency.remove(p) };
                     }
                 }
-                report(if on { t!("Режим эффективности включён", "Efficiency mode on") } else { t!("Режим эффективности выключен", "Efficiency mode off") }, ok.len());
+                report(if on { "Efficiency mode on" } else { "Efficiency mode off" }, ok.len());
             }
-            Act::Affinity(half) => report(t!("Привязка к ядрам", "Core affinity"), pids.iter().filter(|&&p| sys::set_affinity(p, half)).count()),
+            Act::Affinity(half) => report("Core affinity", pids.iter().filter(|&&p| sys::set_affinity(p, half)).count()),
             Act::OpenDir => {
                 let d = self.data.borrow();
                 let path = pids.iter().find_map(|&p| d.procs.iter().find(|x| x.pid == p).and_then(|x| x.exe.clone()));
@@ -1048,7 +1048,7 @@ impl App {
                         use std::os::windows::process::CommandExt;
                         let _ = std::process::Command::new("explorer").raw_arg(format!("/select,\"{}\"", p.replace("\\..\\", "\\"))).spawn();
                     }
-                    None => self.toast(t!("Путь к файлу недоступен (системный или защищённый процесс)", "File path unavailable (system or protected process)")),
+                    None => self.toast("File path unavailable (system or protected process)"),
                 }
             }
             Act::CopyCmd => {
@@ -1056,10 +1056,10 @@ impl App {
                 let cmd = process_cmd(&d, pids[0]);
                 drop(d);
                 if cmd.is_empty() {
-                    self.toast(t!("Командная строка недоступна для этого процесса", "Command line unavailable for this process"));
+                    self.toast("Command line unavailable for this process");
                 } else {
                     nwg::Clipboard::set_data_text(&self.win, &cmd);
-                    self.toast(t!("Командная строка скопирована", "Command line copied"));
+                    self.toast("Command line copied");
                 }
             }
             Act::RuleLower | Act::RuleNotify => {
@@ -1072,10 +1072,10 @@ impl App {
                 let msg = {
                     let mut d = self.data.borrow_mut();
                     if d.rules.iter().any(|r| r.proc == name && r.act == act) {
-                        t!("Такое правило уже есть (страница «Правила»)", "This rule already exists ('Rules' page)").to_string()
+                        "This rule already exists ('Rules' page)".to_string()
                     } else {
                         d.rules.push(store::Rule { proc: name.clone(), cpu: 25.0, secs: 60, act, hits: 0 });
-                        tf!("Правило добавлено: «{name}» — ЦП > 25% дольше 60 с", "Rule added: '{name}' - CPU > 25% for over 60 s")
+                        format!("Rule added: '{name}' - CPU > 25% for over 60 s")
                     }
                 };
                 self.save_settings();
@@ -1093,9 +1093,9 @@ impl App {
         };
         let n = row.aux.clone();
         self.toast(&match sys::service_ctl(&n, start) {
-            Ok(()) => tf!("Служба {n}: команда отправлена", "Service {n}: command sent"),
-            Err(5) => tf!("Служба {n}: отказано в доступе — запустите от администратора", "Service {n}: access denied - run as administrator"),
-            Err(e) => tf!("Служба {n}: ошибка Win32 {e}", "Service {n}: Win32 error {e}"),
+            Ok(()) => format!("Service {n}: command sent"),
+            Err(5) => format!("Service {n}: access denied - run as administrator"),
+            Err(e) => format!("Service {n}: Win32 error {e}"),
         });
     }
 
@@ -1116,9 +1116,9 @@ impl App {
             let d = self.data.borrow();
             match d.startup.iter().find(|s| s.key() == row.key) {
                 Some(it) => match startup::set_enabled(it, on) {
-                    Ok(()) => format!("«{}»: {}", it.name, if on { t!("включено", "enabled") } else { t!("отключено — не будет запускаться при входе в Windows", "disabled - will not start with Windows") }),
-                    Err(5) => tf!("«{}»: нужны права администратора", "'{}': administrator rights needed", it.name),
-                    Err(e) => tf!("«{}»: ошибка Win32 {e}", "'{}': Win32 error {e}", it.name),
+                    Ok(()) => format!("«{}»: {}", it.name, if on { "enabled" } else { "disabled - will not start with Windows" }),
+                    Err(5) => format!("'{}': administrator rights needed", it.name),
+                    Err(e) => format!("'{}': Win32 error {e}", it.name),
                 },
                 None => return,
             }
@@ -1129,7 +1129,7 @@ impl App {
     }
 
     fn confirm(&self, text: &str) -> bool {
-        let p = nwg::MessageParams { title: t!("Подтверждение", "Confirmation"), content: text, buttons: nwg::MessageButtons::YesNo, icons: nwg::MessageIcons::Warning };
+        let p = nwg::MessageParams { title: "Confirmation", content: text, buttons: nwg::MessageButtons::YesNo, icons: nwg::MessageIcons::Warning };
         nwg::modal_message(&self.win, &p) == nwg::MessageChoice::Yes
     }
 
@@ -1137,7 +1137,7 @@ impl App {
         let ui = self.ui.borrow();
         if !ui.has_table() {
             drop(ui);
-            return self.toast(t!("На этой странице нечего экспортировать", "Nothing to export on this page"));
+            return self.toast("Nothing to export on this page");
         }
         let esc = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
         let mut out = String::from("\u{feff}");
@@ -1151,8 +1151,8 @@ impl App {
         let path = dir.join(format!("rtaskmgr-{}-{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}.csv", page_title(ui.page)));
         drop(ui);
         match std::fs::write(&path, out) {
-            Ok(()) => self.toast(&tf!("Сохранено: {}", "Saved: {}", path.display())),
-            Err(e) => self.toast(&tf!("Не удалось сохранить CSV: {e}", "Could not save CSV: {e}")),
+            Ok(()) => self.toast(&format!("Saved: {}", path.display())),
+            Err(e) => self.toast(&format!("Could not save CSV: {e}")),
         }
     }
 

@@ -27,7 +27,7 @@ pub(crate) const SPLIT_DEFAULT: u32 = 3670016; // 3.5 GB: above it Windows gives
 pub(crate) fn rx_trim(on: bool) {
     for (s, off, def) in RX_SVCS {
         let v = if on { off } else { def };
-        soft(&tf!("служба {s}", "service {s}"), run("reg", &["add", &format!(r"HKLM\SYSTEM\CurrentControlSet\Services\{s}"), "/v", "Start", "/t", "REG_DWORD", "/d", &v.to_string(), "/f"]));
+        soft(&format!("service {s}"), run("reg", &["add", &format!(r"HKLM\SYSTEM\CurrentControlSet\Services\{s}"), "/v", "Start", "/t", "REG_DWORD", "/d", &v.to_string(), "/f"]));
         if on && off == 4 {
             let _ = run("sc.exe", &["stop", s]); // the per-user cbdhsvc_xxxx instance stops at the next sign-in
         }
@@ -51,7 +51,7 @@ pub(crate) fn rx_lnk() -> PathBuf {
 
 pub(crate) fn rx_install() -> Result<(), String> {
     if !bar_dir().join("topbar.exe").is_file() {
-        return Err(t!("сначала установите topbar: без него после отключения Explorer не будет панели", "install topbar first: without it there will be no bar after Explorer is disabled").into());
+        return Err("install topbar first: without it there will be no bar after Explorer is disabled".into());
     }
     with_payload(&["rust-explorer.exe", "rs-shell.exe"], |d| {
         for n in ["rs-shell.exe", "rust-explorer.exe"] {
@@ -86,18 +86,18 @@ pub(crate) fn rx_install() -> Result<(), String> {
         if run("powershell", &["-NoProfile", "-Command", &task]).is_ok() {
             let _ = run("reg", &["delete", RUN_KEY, "/v", "rs-overlay", "/f"]);
         } else {
-            WARN.lock().unwrap().push(t!("задача rs-overlay не создана: запуск через Run, с задержкой Windows", "rs-overlay task was not created: it starts via Run, with a Windows startup delay").into());
+            WARN.lock().unwrap().push("rs-overlay task was not created: it starts via Run, with a Windows startup delay".into());
             run("reg", &["add", RUN_KEY, "/v", "rs-overlay", "/t", "REG_SZ", "/d", &format!("\"{}\" --overlay", sh.display()), "/f"])?;
         }
         run("reg", &["add", RX_SWITCH, "/v", "ReplaceExplorer", "/t", "REG_DWORD", "/d", "1", "/f"])?;
         run("reg", &["add", WINLOGON_KEY, "/v", "AutoRestartShell", "/t", "REG_DWORD", "/d", "0", "/f"])?;
         rx_trim(true);
         // the bar's Start panel and the search list Start Menu shortcuts only: without one rust-explorer has no entry (and no icon) there
-        soft(t!("ярлык «Rust Explorer» в меню Пуск не создан", "Start menu shortcut 'Rust Explorer' was not created"), shortcut(&start_lnk("Rust Explorer"), &fm, ""));
+        soft("Start menu shortcut 'Rust Explorer' was not created", shortcut(&start_lnk("Rust Explorer"), &fm, ""));
         // Start it now, with the user's normal token: explorer.exe opens a shortcut unelevated, and the shortcut carries --overlay.
         let lnk = rx_lnk();
         let _ = fs::create_dir_all(lnk.parent().unwrap());
-        soft(t!("overlay не запущен сейчас: он стартует при следующем входе", "overlay is not running now: it starts at the next logon"), shortcut(&lnk, &sh, "--overlay"));
+        soft("overlay is not running now: it starts at the next logon", shortcut(&lnk, &sh, "--overlay"));
         let _ = Command::new("explorer.exe").arg(&lnk).spawn();
         Ok(())
     })
@@ -115,7 +115,7 @@ pub(crate) fn rx_uninstall() -> Result<(), String> {
         let _ = run("reg", &["delete", k, "/f"]); // only our HKCU override; the system's verbs under HKLM stay
         let bak = rx_folders_bak(i);
         if bak.is_file() {
-            soft(&tf!("привязка папок {k} не возвращена", "folder verbs {k} were not restored"), run("reg", &["import", &bak.display().to_string()]));
+            soft(&format!("folder verbs {k} were not restored"), run("reg", &["import", &bak.display().to_string()]));
         }
     }
     for n in ["rs-shell.exe", "rust-explorer.exe"] {

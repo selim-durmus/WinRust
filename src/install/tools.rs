@@ -31,7 +31,7 @@ pub(crate) fn tool_install(exe: &str, dir: &Path, lnk: Option<&str>) -> Result<(
         let dst = dir.join(exe);
         put(&d.join(exe), &dst)?;
         if let Some(n) = lnk {
-            soft(&tf!("ярлык «{n}» в меню Пуск не создан, поиск его не увидит", "Start menu shortcut '{n}' was not created, search will not find it"), shortcut(&start_lnk(n), &dst, ""));
+            soft(&format!("Start menu shortcut '{n}' was not created, search will not find it"), shortcut(&start_lnk(n), &dst, ""));
         }
         Ok(())
     })

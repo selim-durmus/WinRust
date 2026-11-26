@@ -151,10 +151,10 @@ pub fn measured() -> bool {
 /// "2.9 GB (1)", "none", "measuring…".
 pub fn text() -> String {
     match &*FOUND.lock().unwrap() {
-        None => t!("считаю…", "measuring…").into(),
+        None => "measuring…".into(),
         Some(f) => {
             let old: Vec<_> = f.iter().filter(|p| p.old).collect();
-            if old.is_empty() { t!("нет", "none").into() } else { format!("{} ({})", crate::power::size(old.iter().map(|p| p.bytes).sum()), old.len()) }
+            if old.is_empty() { "none".into() } else { format!("{} ({})", crate::power::size(old.iter().map(|p| p.bytes).sum()), old.len()) }
         }
     }
 }
@@ -240,9 +240,9 @@ pub fn clean_now(done: impl FnOnce(String) + Send + 'static) {
         *FOUND.lock().unwrap() = Some(scan());
         let after: u64 = FOUND.lock().unwrap().iter().flatten().filter(|p| p.old).map(|p| p.bytes).sum();
         done(match code {
-            None => t!("Отменено: нужны права администратора", "Cancelled: needs administrator rights").into(),
-            Some(c) if c >> 8 & 255 > 0 => tf!("Удалено: {}, не удалось: {} (см. old-drivers.log)", "Removed: {}, failed: {} (see old-drivers.log)", c & 255, c >> 8 & 255),
-            Some(c) => tf!("Удалено старых драйверов: {} ({})", "Old drivers removed: {} ({})", c & 255, crate::power::size(before.saturating_sub(after))),
+            None => "Cancelled: needs administrator rights".into(),
+            Some(c) if c >> 8 & 255 > 0 => format!("Removed: {}, failed: {} (see old-drivers.log)", c & 255, c >> 8 & 255),
+            Some(c) => format!("Old drivers removed: {} ({})", c & 255, crate::power::size(before.saturating_sub(after))),
         });
     });
 }
@@ -254,11 +254,11 @@ pub fn set_auto(on: bool, done: impl FnOnce(String) + Send + 'static) {
         let code = if elevated() { Some(auto_code(on)) } else { run_elevated(what) };
         AUTO.store(match task_exists() { Some(true) => 2, Some(false) => 1, None => 0 }, Relaxed);
         done(match code {
-            None => t!("Отменено: нужны права администратора", "Cancelled: needs administrator rights").into(),
-            Some(0) if on => t!("Старые драйверы будут удаляться после установки нового", "Old drivers will be removed after a new one is installed").into(),
-            Some(0) => t!("Автоудаление выключено", "Automatic removal turned off").into(),
-            Some(2) => t!("Только из установленной копии (Program Files)", "Only from the installed copy (Program Files)").into(),
-            Some(_) => t!("Не удалось изменить задание планировщика", "Could not change the scheduled task").into(),
+            None => "Cancelled: needs administrator rights".into(),
+            Some(0) if on => "Old drivers will be removed after a new one is installed".into(),
+            Some(0) => "Automatic removal turned off".into(),
+            Some(2) => "Only from the installed copy (Program Files)".into(),
+            Some(_) => "Could not change the scheduled task".into(),
         });
     });
 }

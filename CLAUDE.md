@@ -15,7 +15,7 @@
 | `src/main.rs` | таблица `PLUGINS` и общее состояние |
 | `src/install/` | что каждый плагин меняет в системе и как откатывается (файл на плагин; `mod.rs`: общие хелперы, payload, `install_plugin`/`rollback`) |
 | `src/cli.rs`, `src/ui.rs` | командная строка и окно |
-| `common/` | `winrust-common`: `t!`/`tf!`/`en!` (язык) и `mft` (чтение MFT) для всех программ |
+| `common/` | `winrust-common`: стили, разбор вывода reg.exe и `mft` (чтение MFT) для всех программ |
 | `plugins/<имя>/`, `ReShell/` | исходники плагинов (это и есть оригиналы: копий на рабочем столе больше нет, правь здесь) |
 | `payload.txt` | единственный список вшиваемых exe: из него читают `build.rs` и `scripts\build-plugins.ps1` |
 
@@ -26,7 +26,7 @@
 - Полная сборка: `powershell -ExecutionPolicy Bypass -File scripts\build-all.ps1` (плагины → `payload\` → установщик).
 - Только плагины: `scripts\build-plugins.ps1`. Только установщик: `cargo build --release -p plugin-launcher` (нужен заполненный `payload\`).
 - Тесты: `cargo test --workspace` и `cargo test` в `plugins\rust-search`. У самого установщика тестового exe нет (`test = false`: манифест требует админа).
-- В юнит-тестах тексты всегда русские: в коде с тестами пиши `en!()`, а не `english()`.
+- Интерфейс всех программ только на английском: тексты пиши прямо строками (макросов `t!`/`tf!`/`en!` и переключателя языка больше нет).
 
 ## Обновить установленный плагин после правки (без пересборки установщика)
 

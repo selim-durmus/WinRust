@@ -142,7 +142,7 @@ pub fn apps() -> Vec<(u32, String)> {
         if out.iter().any(|o| o.0 == pid) {
             continue;
         }
-        let name = if pid == 0 { t!("Системные звуки", "System sounds").to_string() } else { proc_name(pid).unwrap_or_else(|| format!("PID {pid}")) };
+        let name = if pid == 0 { "System sounds".to_string() } else { proc_name(pid).unwrap_or_else(|| format!("PID {pid}")) };
         out.push((pid, name));
     }
     out.sort_by_key(|a| a.1.to_lowercase());

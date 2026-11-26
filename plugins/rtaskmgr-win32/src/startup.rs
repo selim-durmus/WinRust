@@ -20,11 +20,11 @@ struct Source {
 }
 
 static SOURCES: std::sync::LazyLock<[Source; 5]> = std::sync::LazyLock::new(|| [
-    Source { label: t!("Реестр, текущий пользователь", "Registry, current user"), hklm: false, run: Some(RUN), approved: "Run" },
-    Source { label: t!("Реестр, все пользователи", "Registry, all users"), hklm: true, run: Some(RUN), approved: "Run" },
-    Source { label: t!("Реестр, все пользователи (32-бит)", "Registry, all users (32-bit)"), hklm: true, run: Some(RUN32), approved: "Run32" },
-    Source { label: t!("Папка автозагрузки (пользователь)", "Startup folder (user)"), hklm: false, run: None, approved: "StartupFolder" },
-    Source { label: t!("Папка автозагрузки (все)", "Startup folder (all users)"), hklm: true, run: None, approved: "StartupFolder" },
+    Source { label: "Registry, current user", hklm: false, run: Some(RUN), approved: "Run" },
+    Source { label: "Registry, all users", hklm: true, run: Some(RUN), approved: "Run" },
+    Source { label: "Registry, all users (32-bit)", hklm: true, run: Some(RUN32), approved: "Run32" },
+    Source { label: "Startup folder (user)", hklm: false, run: None, approved: "StartupFolder" },
+    Source { label: "Startup folder (all users)", hklm: true, run: None, approved: "StartupFolder" },
 ]);
 
 pub struct Item {
@@ -198,7 +198,7 @@ mod tests {
         unsafe { RegSetValueExW(run, w(name).as_ptr(), 0, REG_SZ, value.as_ptr() as *const u8, (value.len() * 2) as u32) };
         let find = |on: bool| list().into_iter().any(|i| i.name == name && i.source == 0 && i.enabled == on);
         let result = std::panic::catch_unwind(|| {
-            assert!(find(true), "новое значение должно быть включено");
+            assert!(find(true), "the new value must be enabled");
             let it = list().into_iter().find(|i| i.name == name).unwrap();
             set_enabled(&it, false).unwrap();
             assert!(find(false), "после set_enabled(false) значение отключено");

@@ -27,10 +27,10 @@ pub(crate) fn tm_install() -> Result<(), String> {
         put(&d.join("Task manager.exe"), &dst)?;
         put(&d.join("rs-du.exe"), &tm_dir().join("rs-du.exe"))?;
         // the search (and the bar's Start panel) lists Start Menu shortcuts only, so without one the task manager is invisible to them
-        soft(t!("ярлык в меню Пуск не создан, поиск не увидит диспетчер", "Start menu shortcut was not created, search will not find the task manager"), shortcut(&start_lnk("Task manager"), &dst, ""));
+        soft("Start menu shortcut was not created, search will not find the task manager", shortcut(&start_lnk("Task manager"), &dst, ""));
         // elevated start without a UAC prompt (the exe re-launches itself through this task), so it can end protected processes
         let task = format!("{} Register-ScheduledTask -TaskName rtaskmgr -Force -Action (New-ScheduledTaskAction -Execute '{}') -Principal (New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Highest) -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances Parallel) | Out-Null", task_user(), dst.display());
-        soft(t!("задача rtaskmgr не создана, запуск от администратора будет через UAC", "rtaskmgr task was not created, launching as administrator will go through UAC"), run("powershell", &["-NoProfile", "-Command", &task]));
+        soft("rtaskmgr task was not created, launching as administrator will go through UAC", run("powershell", &["-NoProfile", "-Command", &task]));
         run("reg", &["add", TM_KEY, "/v", "Debugger", "/t", "REG_SZ", "/d", &format!("\"{}\"", dst.display()), "/f"])
     })
 }

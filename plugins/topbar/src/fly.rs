@@ -532,7 +532,7 @@ unsafe fn read_nets() {
             NOTE.set(String::new());
         } else if now_ms().saturating_sub(t0) > 25_000 {
             CONNECTING.set(None);
-            NOTE.set(tf!("Не удалось подключиться к «{ssid}»", "Could not connect to “{ssid}”"));
+            NOTE.set(format!("Could not connect to “{ssid}”"));
         }
     }
 }
@@ -548,7 +548,7 @@ unsafe fn forget(ssid: &str) {
     let w = wide(&p);
     let mut ok = false;
     for_each_wlan(|h, g| ok |= WlanDeleteProfile(h, g, w.as_ptr(), null()) == 0);
-    NOTE.set(if ok { tf!("Сеть «{ssid}» забыта", "Forgot “{ssid}”") } else { tf!("Не удалось забыть «{ssid}»", "Could not forget “{ssid}”") });
+    NOTE.set(if ok { format!("Forgot “{ssid}”") } else { format!("Could not forget “{ssid}”") });
     read_nets();
 }
 
@@ -586,7 +586,7 @@ unsafe fn wifi_join(n: &Net, pass: &str) {
         wifi_connect(&n.ssid, &n.g);
         start_connecting(&n.ssid);
     } else {
-        NOTE.set(t!("Не удалось сохранить сеть (неверный формат пароля?)", "Could not save the network (wrong password format?)").into());
+        NOTE.set("Could not save the network (wrong password format?)".into());
     }
 }
 
@@ -636,11 +636,11 @@ const CTX_ROW: i32 = 34;
 fn ctx_items(ssid: &str) -> Vec<(&'static str, u8)> {
     NETS.with_borrow(|n| {
         let Some(n) = n.iter().find(|n| n.ssid == ssid) else { return vec![] };
-        let mut v = vec![if n.connected { (t!("Отключиться", "Disconnect"), 1) } else { (t!("Подключиться", "Connect"), 0) }];
+        let mut v = vec![if n.connected { ("Disconnect", 1) } else { ("Connect", 0) }];
         if n.profile.is_some() {
-            v.push((t!("Забыть сеть", "Forget network"), 2));
+            v.push(("Forget network", 2));
         }
-        v.push((t!("Известные сети…", "Known networks…"), 3));
+        v.push(("Known networks…", 3));
         v
     })
 }
@@ -796,18 +796,17 @@ fn menu_rows() -> (Vec<(i32, i32)>, i32) {
 pub fn context_menu(x: i32) {
     let pu = crate::purge_installed();
     let mut items = vec![
-        MItem::new(t!("Параметры Windows", "Windows Settings")).hint("Win+I"),
-        MItem::new(t!("Персонализация", "Personalization")),
-        MItem::new(t!("Диспетчер задач", "Task Manager")).hint("Ctrl+Shift+Esc").sep(),
-        MItem::new(t!("Чистильщик диска", "Disk Cleaner")),
-        MItem::new(t!("Программы WinRust на English", "WinRust apps in Русский")), // shared with the other WinRust programs
-        MItem::new(t!("Закрыть панель", "Close the bar")).danger().sep(),
+        MItem::new("Windows Settings").hint("Win+I"),
+        MItem::new("Personalization"),
+        MItem::new("Task Manager").hint("Ctrl+Shift+Esc").sep(),
+        MItem::new("Disk Cleaner"),
+        MItem::new("Close the bar").danger().sep(),
     ];
     if pu {
-        items.insert(4, MItem::new(t!("Удалить мусор Windows (необратимо)", "Remove Windows junk (irreversible)")).danger());
+        items.insert(4, MItem::new("Remove Windows junk (irreversible)").danger());
     }
     // the bar's own look (style, auto-hide, see-through panel): its only home now that the bar has no gear button
-    items.insert(0, MItem::new(t!("Стиль панели…", "Bar style…")));
+    items.insert(0, MItem::new("Bar style…"));
     menu(x, None, items, move |i| unsafe {
         if i == 0 {
             // opened by the bar once this menu is gone (a menu does not open from inside another one's pick)
@@ -823,7 +822,6 @@ pub fn context_menu(x: i32) {
             2 => open(&wide(&format!(r"{}\System32\taskmgr.exe", std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())))),
             3 => open_cleaner(),
             99 => crate::open_purge(),
-            4 => crate::i18n::set_english(!crate::i18n::english()),
             _ => _ = PostMessageW(FindWindowW(wide("topbar").as_ptr(), null()), WM_CLOSE, 0, 0), // quits the bar, brings the Windows taskbar back
         }
     });
@@ -1147,7 +1145,7 @@ unsafe fn run_act(a: Act, rect: RECT, x: i32) {
                 None => {
                     // no answer from the radio list (still reading, or Windows hides it from us): do not sit silent, show Windows' page
                     crate::quick::refresh();
-                    NOTE.set(t!("Нет данных о Bluetooth, открываю параметры", "No Bluetooth state, opening Settings").into());
+                    NOTE.set("No Bluetooth state, opening Settings".into());
                     open(&wide("ms-settings:bluetooth"));
                     close();
                 }
@@ -1159,10 +1157,10 @@ unsafe fn run_act(a: Act, rect: RECT, x: i32) {
                 let (nar, mag) = (crate::quick::running("Narrator.exe"), crate::quick::running("Magnify.exe"));
                 let (sticky, filter) = (crate::quick::sticky_keys(), crate::quick::filter_keys());
                 let items = vec![
-                    MItem::new(t!("Экранный диктор", "Narrator")).hint("Win+Ctrl+Enter").on(nar),
-                    MItem::new(t!("Экранная лупа", "Magnifier")).hint("Win +/Esc").on(mag),
-                    MItem::new(t!("Залипание клавиш", "Sticky keys")).on(sticky).sep(),
-                    MItem::new(t!("Фильтрация ввода", "Filter keys")).on(filter),
+                    MItem::new("Narrator").hint("Win+Ctrl+Enter").on(nar),
+                    MItem::new("Magnifier").hint("Win +/Esc").on(mag),
+                    MItem::new("Sticky keys").on(sticky).sep(),
+                    MItem::new("Filter keys").on(filter),
                 ];
                 menu(pt.x, None, items, move |i| match i {
                     0 => keys(&[VK_LWIN, VK_CONTROL, VK_RETURN]),
@@ -1214,7 +1212,7 @@ unsafe fn run_act(a: Act, rect: RECT, x: i32) {
         }
         Act::NetOff => {
             for_each_wlan(|h, g| _ = WlanDisconnect(h, g, null()));
-            NOTE.set(t!("Отключено", "Disconnected").into());
+            NOTE.set("Disconnected".into());
         }
         Act::Ctx(j) => {
             let Some((ssid, ..)) = CTX.take() else { return };
@@ -1344,24 +1342,24 @@ unsafe fn paint(hw: HWND, k: Kind) {
             let ssid = NETS.with_borrow(|n| n.iter().find(|n| n.connected).map(|n| n.ssid.clone()));
             let wsub = match (q >= 0, ssid) {
                 (true, Some(s)) => s,
-                (true, None) => t!("Подключено", "Connected").into(),
-                _ if NETS.with_borrow(|n| n.is_empty()) => t!("Выключен", "Off").into(),
-                _ => t!("Не подключено", "Not connected").into(),
+                (true, None) => "Connected".into(),
+                _ if NETS.with_borrow(|n| n.is_empty()) => "Off".into(),
+                _ => "Not connected".into(),
             };
             let (bt, air, acc, eco) = (crate::quick::bluetooth(), crate::quick::airplane(), crate::quick::accessibility_on(), crate::quick::energy_saver());
             let onoff = |b: Option<bool>| match b {
-                Some(true) => t!("Вкл.", "On").to_string(),
-                Some(false) => t!("Выкл.", "Off").to_string(),
-                None => t!("Нет", "None").to_string(),
+                Some(true) => "On".to_string(),
+                Some(false) => "Off".to_string(),
+                None => "None".to_string(),
             };
             let states = [q >= 0, bt == Some(true), air == Some(true), acc, eco, false];
             let tiles = [
                 ("\u{E701}", "Wi‑Fi".to_string(), wsub),
                 ("\u{E702}", "Bluetooth".to_string(), onoff(bt)),
-                ("\u{E709}", t!("Авиарежим", "Airplane mode").to_string(), onoff(air)),
-                ("\u{E776}", t!("Спец. возможности", "Accessibility").to_string(), onoff(Some(acc))),
-                ("\u{E945}", t!("Экономия энергии", "Energy saver").to_string(), onoff(Some(eco))),
-                ("\u{E7F0}", t!("Субтитры", "Live captions").to_string(), String::new()),
+                ("\u{E709}", "Airplane mode".to_string(), onoff(air)),
+                ("\u{E776}", "Accessibility".to_string(), onoff(Some(acc))),
+                ("\u{E945}", "Energy saver".to_string(), onoff(Some(eco))),
+                ("\u{E7F0}", "Live captions".to_string(), String::new()),
             ];
             for (i, (glyph, label, sub)) in tiles.iter().enumerate() {
                 let (tl, tt) = (16 + 112 * (i as i32 % 3), 16 + 84 * (i as i32 / 3));
@@ -1465,10 +1463,10 @@ unsafe fn paint(hw: HWND, k: Kind) {
             } else {
                 match state {
                     Link::Wifi(_) => None,
-                    Link::NoInternet(_) => Some((t!("Подключено, но интернета нет", "Connected, no internet").to_string(), WARN)),
-                    Link::Cable => Some((t!("Интернет по кабелю", "Online over a cable").into(), pal().dim)),
-                    Link::Offline if on => Some((t!("Не подключено", "Not connected").into(), pal().dim)),
-                    Link::Offline => Some((t!("Выключен", "Turned off").into(), pal().dim)),
+                    Link::NoInternet(_) => Some(("Connected, no internet".to_string(), WARN)),
+                    Link::Cable => Some(("Online over a cable".into(), pal().dim)),
+                    Link::Offline if on => Some(("Not connected".into(), pal().dim)),
+                    Link::Offline => Some(("Turned off".into(), pal().dim)),
                 }
             };
             SelectObject(dc, f_title);
@@ -1494,7 +1492,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
             if let Some((i, p)) = pass {
                 let name = NETS.with_borrow(|n| n.get(i).map(|n| n.ssid.clone()).unwrap_or_default());
                 SelectObject(dc, f_txt);
-                text(dc, &tf!("Пароль для «{name}»", "Password for “{name}”"), r(18, 62, w - 18, 84), pal().text, DT_LEFT);
+                text(dc, &format!("Password for “{name}”"), r(18, 62, w - 18, 84), pal().text, DT_LEFT);
                 fill(dc, r(16, 90, w - 16, 128), pal().accent, sc(10));
                 fill(dc, r(18, 92, w - 18, 126), card, sc(8));
                 let dots = "•".repeat(p.chars().count());
@@ -1509,7 +1507,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 }
                 BUSY.set(true);
                 SelectObject(dc, f_small);
-                text(dc, t!("Enter — подключиться · Esc — отмена", "Enter — connect · Esc — cancel"), r(18, 136, w - 18, 156), pal().dim, DT_LEFT);
+                text(dc, "Enter — connect · Esc — cancel", r(18, 136, w - 18, 156), pal().dim, DT_LEFT);
             } else {
                 let (rows, label, _) = wifi_rows();
                 let conn = CONN.with_borrow(|c| c.as_ref().map(|c| (c.q, c.phy, c.rx, c.tx)));
@@ -1519,11 +1517,11 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 NETS.with_borrow(|nets| {
                     if nets.is_empty() {
                         SelectObject(dc, f_txt);
-                        text(dc, if on { t!("Рядом нет сетей", "No networks nearby") } else { t!("Включите Wi‑Fi, чтобы увидеть сети", "Turn Wi‑Fi on to see networks") }, r(18, 70, w - 18, 110), pal().dim, DT_LEFT);
+                        text(dc, if on { "No networks nearby" } else { "Turn Wi‑Fi on to see networks" }, r(18, 70, w - 18, 110), pal().dim, DT_LEFT);
                     }
                     if let Some(ly) = label {
                         SelectObject(dc, f_small);
-                        text(dc, t!("Другие сети", "Other networks"), r(20, ly + 2, w - 16, ly + 22), pal().dim, DT_LEFT);
+                        text(dc, "Other networks", r(20, ly + 2, w - 16, ly + 22), pal().dim, DT_LEFT);
                     }
                     // the connected network on its own card, the others together on one, split by hairlines
                     let others: Vec<usize> = (0..nets.len()).filter(|&i| !nets[i].connected).collect();
@@ -1554,20 +1552,20 @@ unsafe fn paint(hw: HWND, k: Kind) {
                         wifi_glyph(dc, rc.left + sc(26), cy - sc(1), sc(16), lit, ink(arc), ink(mix(pal().dim, card, 0.55)), if n.connected && !online { 2 } else { 0 });
                         let saved = n.profile.is_some();
                         let (sub, sub_c) = if busy {
-                            (format!("{}{}", t!("Подключение", "Connecting"), &"...."[..(now / 400 % 4) as usize]), pal().accent)
+                            (format!("{}{}", "Connecting", &"...."[..(now / 400 % 4) as usize]), pal().accent)
                         } else if n.connected {
                             let q = conn.map(|c| c.0).unwrap_or(n.q);
                             match conn {
-                                _ if !online => (t!("Подключено, без интернета", "Connected, no internet").into(), WARN),
+                                _ if !online => ("Connected, no internet".into(), WARN),
                                 // under the pointer the line shows the link details instead
-                                Some((_, _, rx, tx)) if open => (format!("↓{rx} ↑{tx} {} · {}", t!("Мбит/с", "Mbps"), auth_name(n.auth)), pal().dim),
-                                Some((_, phy, ..)) => (format!("{} · {phy} · {q}%", t!("Подключено", "Connected")), pal().dim),
-                                None => (format!("{} · {q}%", t!("Подключено", "Connected")), pal().dim),
+                                Some((_, _, rx, tx)) if open => (format!("↓{rx} ↑{tx} {} · {}", "Mbps", auth_name(n.auth)), pal().dim),
+                                Some((_, phy, ..)) => (format!("{} · {phy} · {q}%", "Connected"), pal().dim),
+                                None => (format!("{} · {q}%", "Connected"), pal().dim),
                             }
                         } else if !n.secure {
-                            (t!("Открытая сеть", "Open network").into(), WARN)
+                            ("Open network".into(), WARN)
                         } else if saved {
-                            (t!("Сохранена", "Saved").into(), pal().dim)
+                            ("Saved".into(), pal().dim)
                         } else {
                             (String::new(), pal().dim)
                         };
@@ -1595,7 +1593,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                                 if let Some(&(ob, _)) = rs.iter().find(|(_, a)| *a == Act::NetOff) {
                                     g(Act::NetOff, ob, card, mix(card, BAD, 0.14), ob.bottom - ob.top);
                                     SelectObject(dc, f_semi);
-                                    text(dc, t!("Отключиться", "Disconnect"), ob, if hot(Act::NetOff) { BAD } else { pal().dim }, DT_CENTER);
+                                    text(dc, "Disconnect", ob, if hot(Act::NetOff) { BAD } else { pal().dim }, DT_CENTER);
                                 }
                             } else {
                                 SelectObject(dc, f_glyph);
@@ -1603,7 +1601,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                             }
                         } else if open && !busy {
                             SelectObject(dc, f_semi);
-                            let action = if saved || !n.secure { t!("Подключить", "Connect") } else { t!("Ввести пароль", "Enter password") };
+                            let action = if saved || !n.secure { "Connect" } else { "Enter password" };
                             text(dc, action, RECT { left: rc.right - sc(130), right: rc.right - sc(16), ..rc }, pal().accent, DT_RIGHT);
                         } else if n.secure && !busy {
                             SelectObject(dc, f_gs);
@@ -1615,7 +1613,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
             if let Some(&(lr, la)) = rs.iter().find(|(_, a)| matches!(a, Act::Settings(_))) {
                 g(la, lr, pal().bg, mix(pal().bg, pal().text, 0.05), sc(10));
                 SelectObject(dc, f_txt);
-                text(dc, t!("Параметры сети", "Network settings"), RECT { left: lr.left + sc(8), ..lr }, pal().accent, DT_LEFT);
+                text(dc, "Network settings", RECT { left: lr.left + sc(8), ..lr }, pal().accent, DT_LEFT);
                 SelectObject(dc, f_gs);
                 text(dc, "\u{E76C}", RECT { left: lr.right - sc(34), ..lr }, pal().dim, DT_CENTER); // chevron right
             }
@@ -1772,9 +1770,9 @@ unsafe fn paint(hw: HWND, k: Kind) {
                         let kind = if sel && !q.is_empty() {
                             "Enter ↵"
                         } else if crate::winset::is_page(&path) {
-                            t!("Параметры", "Setting")
+                            "Setting"
                         } else if store {
-                            t!("Приложение", "App")
+                            "App"
                         } else {
                             ""
                         };

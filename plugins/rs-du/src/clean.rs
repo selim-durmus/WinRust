@@ -44,16 +44,16 @@ fn rules() -> Vec<Item> {
     let mut v: Vec<Item> = vec![];
     let mut add = |risk, label: &str, note, paths: Vec<PathBuf>| v.push(Item { risk, how: How::Wipe, label: label.into(), note, paths, bytes: 0 });
 
-    add(Risk::Safe, t!("Временные файлы", "Temporary files"), t!("Мусор от программ и установщиков. Программы создадут нужное заново.", "Junk left by programs and installers. Programs will recreate what they need."),
+    add(Risk::Safe, "Temporary files", "Junk left by programs and installers. Programs will recreate what they need.",
         [var("TEMP").into_iter().collect::<Vec<_>>(), at(&win, &["Temp"])].concat());
-    add(Risk::Safe, t!("Отчёты об ошибках и дампы падений", "Error reports and crash dumps"), t!("Данные о сбоях программ для разработчиков. Вам они не нужны.", "Program crash data for developers. You do not need it."),
+    add(Risk::Safe, "Error reports and crash dumps", "Program crash data for developers. You do not need it.",
         [at(&pdata, &["Microsoft/Windows/WER/ReportArchive", "Microsoft/Windows/WER/ReportQueue"]), at(&local, &["CrashDumps"]), at(&win, &["Minidump"])].concat());
-    add(Risk::Safe, t!("Кеш обновлений Windows", "Windows Update cache"), t!("Уже установленные обновления. Что понадобится, Windows скачает заново.", "Updates that are already installed. Windows re-downloads what it needs."),
+    add(Risk::Safe, "Windows Update cache", "Updates that are already installed. Windows re-downloads what it needs.",
         at(&win, &["SoftwareDistribution/Download", "ServiceProfiles/NetworkService/AppData/Local/Microsoft/Windows/DeliveryOptimization/Cache"]));
-    add(Risk::Safe, t!("Кеш интернета Windows", "Windows internet cache"), t!("Временные копии страниц и картинок для системных программ.", "Temporary copies of pages and images for system programs."), at(&local, &["Microsoft/Windows/INetCache"]));
+    add(Risk::Safe, "Windows internet cache", "Temporary copies of pages and images for system programs.", at(&local, &["Microsoft/Windows/INetCache"]));
 
-    let web = t!("Копии страниц и картинок. Сайты первый раз откроются чуть медленнее. Пароли, закладки и история не затрагиваются.", "Copies of pages and images. Sites open a little slower the first time. Passwords, bookmarks and history are not touched.");
-    for (name, rel) in [("Google Chrome", "Google/Chrome/User Data"), ("Microsoft Edge", "Microsoft/Edge/User Data"), (t!("Яндекс Браузер", "Yandex Browser"), "Yandex/YandexBrowser/User Data"), ("Brave", "BraveSoftware/Brave-Browser/User Data")] {
+    let web = "Copies of pages and images. Sites open a little slower the first time. Passwords, bookmarks and history are not touched.";
+    for (name, rel) in [("Google Chrome", "Google/Chrome/User Data"), ("Microsoft Edge", "Microsoft/Edge/User Data"), ("Yandex Browser", "Yandex/YandexBrowser/User Data"), ("Brave", "BraveSoftware/Brave-Browser/User Data")] {
         let base = local.as_ref().map(|l| l.join(rel)).unwrap_or_default();
         let ps = subdirs(&base, |n| n == "Default" || n.starts_with("Profile ")).into_iter()
             .flat_map(|p| ["Cache/Cache_Data", "Code Cache", "GPUCache", "Service Worker/CacheStorage"].map(|c| p.join(c))).collect();
@@ -61,18 +61,18 @@ fn rules() -> Vec<Item> {
     }
     let ff = local.as_ref().map(|l| l.join("Mozilla/Firefox/Profiles")).unwrap_or_default();
     add(Risk::Rebuild, "Firefox", web, if ff.as_os_str().is_empty() { vec![] } else { subdirs(&ff, |_| true).into_iter().map(|p| p.join("cache2")).collect() });
-    add(Risk::Rebuild, t!("Telegram: кеш медиа", "Telegram: media cache"), t!("Картинки и видео из чатов. Скачаются снова, когда откроете чат.", "Pictures and videos from chats. They download again when you open a chat."), at(&roam, &["Telegram Desktop/tdata/user_data/media_cache", "Telegram Desktop/tdata/user_data/cache"]));
-    add(Risk::Rebuild, "Discord", t!("Кеш картинок и интерфейса. Создастся заново.", "Image and UI cache. It will be recreated."), at(&roam, &["discord/Cache", "discord/Code Cache", "discord/GPUCache"]));
-    add(Risk::Rebuild, "Microsoft Teams", t!("Кеш интерфейса и вложений. Создастся заново.", "UI and attachment cache. It will be recreated."), at(&roam, &["Microsoft/Teams/Cache", "Microsoft/Teams/blob_storage", "Microsoft/Teams/GPUCache", "Microsoft/Teams/tmp"]));
-    add(Risk::Rebuild, "Visual Studio Code", t!("Кеш редактора. Создастся заново.", "Editor cache. It will be recreated."), at(&roam, &["Code/Cache", "Code/CachedData", "Code/GPUCache", "Code/Code Cache"]));
-    add(Risk::Rebuild, t!("Кеш шейдеров видеокарты (NVIDIA, AMD, DirectX)", "GPU shader cache (NVIDIA, AMD, DirectX)"), t!("Игры пересоберут его сами, первый запуск игры может чуть подтормаживать.", "Games rebuild it themselves, the first launch of a game may stutter a little."),
+    add(Risk::Rebuild, "Telegram: media cache", "Pictures and videos from chats. They download again when you open a chat.", at(&roam, &["Telegram Desktop/tdata/user_data/media_cache", "Telegram Desktop/tdata/user_data/cache"]));
+    add(Risk::Rebuild, "Discord", "Image and UI cache. It will be recreated.", at(&roam, &["discord/Cache", "discord/Code Cache", "discord/GPUCache"]));
+    add(Risk::Rebuild, "Microsoft Teams", "UI and attachment cache. It will be recreated.", at(&roam, &["Microsoft/Teams/Cache", "Microsoft/Teams/blob_storage", "Microsoft/Teams/GPUCache", "Microsoft/Teams/tmp"]));
+    add(Risk::Rebuild, "Visual Studio Code", "Editor cache. It will be recreated.", at(&roam, &["Code/Cache", "Code/CachedData", "Code/GPUCache", "Code/Code Cache"]));
+    add(Risk::Rebuild, "GPU shader cache (NVIDIA, AMD, DirectX)", "Games rebuild it themselves, the first launch of a game may stutter a little.",
         at(&local, &["NVIDIA/DXCache", "NVIDIA/GLCache", "D3DSCache", "AMD/DxCache", "AMD/DxcCache"]));
-    add(Risk::Rebuild, t!("Steam: кеш браузера", "Steam: browser cache"), t!("Кеш встроенного браузера Steam. Игры не затрагиваются.", "Cache of Steam's built-in browser. Games are not touched."), at(&local, &["Steam/htmlcache"]));
-    add(Risk::Rebuild, t!("Кеши программистов (cargo, npm, pip, NuGet)", "Developer caches (cargo, npm, pip, NuGet)"), t!("Скачанные пакеты. Загрузятся снова при следующей сборке.", "Downloaded packages. They download again on the next build."),
+    add(Risk::Rebuild, "Steam: browser cache", "Cache of Steam's built-in browser. Games are not touched.", at(&local, &["Steam/htmlcache"]));
+    add(Risk::Rebuild, "Developer caches (cargo, npm, pip, NuGet)", "Downloaded packages. They download again on the next build.",
         [at(&home, &[".cargo/registry/cache", ".cargo/registry/src"]), at(&local, &["npm-cache", "pip/cache", "NuGet/v3-cache"]), at(&roam, &["npm-cache"])].concat());
     if let Some(w) = win.as_ref().and_then(|w| w.parent()) {
-        v.push(Item { risk: Risk::Ask, how: How::Remove, label: t!("Windows.old (прежняя версия Windows)", "Windows.old (previous Windows version)").into(),
-            note: t!("Нужна только для отката на старую Windows.", "Only needed to roll back to the old Windows."), paths: vec![w.join("Windows.old")], bytes: 0 });
+        v.push(Item { risk: Risk::Ask, how: How::Remove, label: "Windows.old (previous Windows version)".into(),
+            note: "Only needed to roll back to the old Windows.", paths: vec![w.join("Windows.old")], bytes: 0 });
     }
     v
 }
@@ -109,8 +109,8 @@ fn old_downloads() -> Option<Item> {
         let p = e.path();
         e.metadata().is_ok_and(|m| m.is_file() && quiet_for(&m, 90)) && p.extension().is_some_and(|x| EXT.contains(&x.to_string_lossy().to_lowercase().as_str()))
     }).map(|e| e.path()).collect();
-    Some(Item { risk: Risk::Ask, how: How::Quarantine, label: tf!("Старые установщики и архивы в «Загрузках» ({} шт., старше 90 дней)", "Old installers and archives in Downloads ({} items, older than 90 days)", paths.len()),
-        note: t!("Скорее всего, программы уже установлены.", "Most likely the programs are already installed."), paths, bytes: 0 })
+    Some(Item { risk: Risk::Ask, how: How::Quarantine, label: format!("Old installers and archives in Downloads ({} items, older than 90 days)", paths.len()),
+        note: "Most likely the programs are already installed.", paths, bytes: 0 })
 }
 
 /// Biggest forgotten videos/archives/installers in the user's own folders (not cloud folders, not AppData).
@@ -126,7 +126,7 @@ fn big_old(recs: &HashMap<u32, Rec>, tot: &HashMap<u32, u64>, drive: char, skip:
         let p = PathBuf::from(path_of(recs, id, drive).0);
         let low = p.to_string_lossy().to_lowercase();
         if !low[3..].starts_with("users\\") || NO.iter().any(|k| low.contains(k)) || skip.contains(&p) || !p.metadata().is_ok_and(|m| quiet_for(&m, 180)) { continue; }
-        out.push(Item { risk: Risk::Ask, how: How::Quarantine, label: p.to_string_lossy().into(), note: t!("Большой файл, который давно не открывали.", "A large file that has not been opened for a long time."), paths: vec![p], bytes: s });
+        out.push(Item { risk: Risk::Ask, how: How::Quarantine, label: p.to_string_lossy().into(), note: "A large file that has not been opened for a long time.", paths: vec![p], bytes: s });
         if out.len() == 15 { break; }
     }
     out
@@ -238,8 +238,8 @@ pub fn restore(drive: char) {
 pub fn clean(recs: &HashMap<u32, Rec>, tot: &HashMap<u32, u64>, drive: char, apply: bool, ask: bool, all: bool, safe_only: bool) {
     let mut items = rules();
     let (proj, pb) = projects(recs, tot, drive);
-    items.push(Item { risk: Risk::Rebuild, how: How::Remove, label: t!("Папки сборки проектов (target, node_modules)", "Project build folders (target, node_modules)").into(), note: t!("Пересоберутся при следующей сборке или npm install.", "They are rebuilt on the next build or npm install."), paths: proj, bytes: pb });
-    items.push(Item { risk: Risk::Ask, how: How::Wipe, label: t!("Корзина", "Recycle Bin").into(), note: t!("Файлы, которые вы уже удалили.", "Files you have already deleted."), paths: vec![PathBuf::from(format!("{drive}:\\$Recycle.Bin"))], bytes: 0 }); // per-user subfolders need admin
+    items.push(Item { risk: Risk::Rebuild, how: How::Remove, label: "Project build folders (target, node_modules)".into(), note: "They are rebuilt on the next build or npm install.", paths: proj, bytes: pb });
+    items.push(Item { risk: Risk::Ask, how: How::Wipe, label: "Recycle Bin".into(), note: "Files you have already deleted.", paths: vec![PathBuf::from(format!("{drive}:\\$Recycle.Bin"))], bytes: 0 }); // per-user subfolders need admin
     let dl = old_downloads();
     let skip = dl.as_ref().map(|d| d.paths.clone()).unwrap_or_default();
     items.extend(dl);
@@ -258,23 +258,23 @@ pub fn clean(recs: &HashMap<u32, Rec>, tot: &HashMap<u32, u64>, drive: char, app
         if last != Some(i.risk) {
             last = Some(i.risk);
             println!("\n{}{}{rst}", col(i.risk), match i.risk {
-                Risk::Safe => t!("БЕЗОПАСНО: Windows и программы создадут это заново сами", "SAFE: Windows and programs recreate this on their own"),
-                Risk::Rebuild => t!("МОЖНО УДАЛИТЬ: пересоздастся, но первое время может работать чуть медленнее", "CAN BE DELETED: it is recreated, but may run a little slower for a while"),
-                Risk::Ask => t!("ТОЛЬКО ПО ВАШЕМУ ВЫБОРУ: проверьте, что это вам не нужно", "YOUR CHOICE ONLY: make sure you do not need this"),
+                Risk::Safe => "SAFE: Windows and programs recreate this on their own",
+                Risk::Rebuild => "CAN BE DELETED: it is recreated, but may run a little slower for a while",
+                Risk::Ask => "YOUR CHOICE ONLY: make sure you do not need this",
             });
         }
-        let fate = match (i.risk, i.how) { (Risk::Ask, How::Quarantine) => t!(" Уйдёт в карантин на 30 дней, можно вернуть (rs-du --restore).", " It goes to quarantine for 30 days and can be restored (rs-du --restore)."), (Risk::Ask, _) => t!(" Удалится навсегда.", " It is deleted permanently."), _ => "" };
+        let fate = match (i.risk, i.how) { (Risk::Ask, How::Quarantine) => " It goes to quarantine for 30 days and can be restored (rs-du --restore).", (Risk::Ask, _) => " It is deleted permanently.", _ => "" };
         println!("{:>3}. {:>9}  {}\n{:>16}{}{fate}", n + 1, human(i.bytes), i.label, "", i.note);
     }
     let mut sel: Vec<bool> = items.iter().map(|i| all || if safe_only { i.risk == Risk::Safe } else { i.risk != Risk::Ask }).collect();
     let sum = |sel: &[bool]| -> u64 { items.iter().zip(sel).filter(|(_, s)| **s).map(|(i, _)| i.bytes).sum() };
-    println!("{}", tf!("\nМожно освободить: {} безопасно, {} всего ({} мест)", "\nYou can free: {} safely, {} in total ({} places)", human(sum(&sel)), human(items.iter().map(|i| i.bytes).sum()), items.len()));
+    println!("{}", format!("\nYou can free: {} safely, {} in total ({} places)", human(sum(&sel)), human(items.iter().map(|i| i.bytes).sum()), items.len()));
     let line = |p: &str| { print!("{p}"); let _ = std::io::stdout().flush(); let mut l = String::new(); let _ = std::io::stdin().read_line(&mut l); l };
-    if !apply && !ask { println!("{}", t!("(только просмотр; --apply удалит безопасное, --apply --all всё, --apply --safe только зелёное)", "(preview only; --apply deletes the safe items, --apply --all everything, --apply --safe only the green ones)")); return; }
+    if !apply && !ask { println!("{}", "(preview only; --apply deletes the safe items, --apply --all everything, --apply --safe only the green ones)"); return; }
     if !apply {
-        select(&line(t!("Enter = очистить безопасное (зелёное и жёлтое), a = всё, 12,13 = безопасное + эти номера, n = отмена: ", "Enter = clean the safe items (green and yellow), a = everything, 12,13 = safe + these numbers, n = cancel:")), &mut sel);
+        select(&line("Enter = clean the safe items (green and yellow), a = everything, 12,13 = safe + these numbers, n = cancel:"), &mut sel);
     }
-    if !sel.contains(&true) { if ask { line(t!("Ничего не удалено. Нажмите Enter, чтобы закрыть.", "Nothing was deleted. Press Enter to close.")); } return; }
+    if !sel.contains(&true) { if ask { line("Nothing was deleted. Press Enter to close."); } return; }
 
     purge(drive, false);
     let log = env::var_os("LOCALAPPDATA").map(|l| PathBuf::from(l).join("rs-du")).unwrap_or_default();
@@ -288,17 +288,17 @@ pub fn clean(recs: &HashMap<u32, Rec>, tot: &HashMap<u32, u64>, drive: char, app
             match i.how {
                 How::Wipe => wipe(p),
                 How::Remove => remove(p),
-                How::Quarantine => { seq += 1; if !quarantine(p, stamp, seq) { println!("{}", tf!("не удалось убрать: {}", "could not remove: {}", p.display())); } }
+                How::Quarantine => { seq += 1; if !quarantine(p, stamp, seq) { println!("{}", format!("could not remove: {}", p.display())); } }
             }
         }
         let left: u64 = i.paths.iter().map(|p| size_of(p)).sum();
         let gone = i.bytes.saturating_sub(left);
         if i.how == How::Quarantine { held += gone } else { freed += gone }
-        if left > 0 && i.how != How::Quarantine { println!("{}", tf!("частично осталось {} (занято программой или нет прав): {}", "partially left {} (in use by a program or no rights): {}", human(left), i.label)); }
+        if left > 0 && i.how != How::Quarantine { println!("{}", format!("partially left {} (in use by a program or no rights): {}", human(left), i.label)); }
     }
-    println!("{}", tf!("\nОсвобождено: {}. В карантине: {} (место вернётся через {QUAR_DAYS} дней или после rs-du --purge).", "\nFreed: {}. In quarantine: {} (the space returns in {QUAR_DAYS} days or after rs-du --purge).", human(freed), human(held)));
-    println!("{}", tf!("Список: {}", "List: {}", log.join("clean-log.txt").display()));
-    if ask { line(t!("Нажмите Enter, чтобы закрыть.", "Press Enter to close.")); }
+    println!("{}", format!("\nFreed: {}. In quarantine: {} (the space returns in {QUAR_DAYS} days or after rs-du --purge).", human(freed), human(held)));
+    println!("{}", format!("List: {}", log.join("clean-log.txt").display()));
+    if ask { line("Press Enter to close."); }
 }
 
 #[cfg(test)]

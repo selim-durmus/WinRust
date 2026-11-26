@@ -70,7 +70,7 @@ pub(crate) fn pin_verb_install(bar: &Path) -> Result<(), String> {
     let cmd = format!("\"{}\" --pin-start \"%1\"", bar.display());
     for ty in PIN_TYPES {
         let k = pin_verb_key(ty);
-        run("reg", &["add", &k, "/v", "MUIVerb", "/t", "REG_SZ", "/d", t!("Закрепить в Пуске", "Pin to Start"), "/f"])?;
+        run("reg", &["add", &k, "/v", "MUIVerb", "/t", "REG_SZ", "/d", "Pin to Start", "/f"])?;
         run("reg", &["add", &k, "/v", "Icon", "/t", "REG_SZ", "/d", &format!("\"{}\",0", bar.display()), "/f"])?;
         run("reg", &["add", &format!(r"{k}\command"), "/ve", "/t", "REG_SZ", "/d", &cmd, "/f"])?;
     }
@@ -96,7 +96,7 @@ pub(crate) fn bar_install() -> Result<(), String> {
         fs::create_dir_all(bar_dir()).map_err(|e| e.to_string())?;
         put(&d.join("topbar.exe"), &dst)?;
         fs::create_dir_all(tm_dir()).map_err(|e| e.to_string())?;
-        put(&d.join("rs-du.exe"), &tm_dir().join("rs-du.exe"))?; // topbar menu "Чистильщик диска"
+        put(&d.join("rs-du.exe"), &tm_dir().join("rs-du.exe"))?; // topbar menu "Disk Cleaner"
         let rsh = bar_dir().join("reshell.exe"); // Win+1/2/3 desktop hotkeys, no args = hotkeys
         let _ = run("taskkill", &["/f", "/im", "reshell.exe"]);
         put(&d.join("reshell.exe"), &rsh)?;
@@ -110,12 +110,12 @@ pub(crate) fn bar_install() -> Result<(), String> {
         if run("powershell", &["-NoProfile", "-Command", &task]).is_ok() && run("schtasks", &["/run", "/tn", "topbar"]).is_ok() {
             let _ = run("reg", &["delete", RUN_KEY, "/v", "topbar", "/f"]);
         } else {
-            WARN.lock().unwrap().push(t!("задача topbar не создана: запуск через Run, без прав администратора", "topbar task was not created: it starts via Run, without administrator rights").into());
+            WARN.lock().unwrap().push("topbar task was not created: it starts via Run, without administrator rights".into());
             run("reg", &["add", RUN_KEY, "/v", "topbar", "/t", "REG_SZ", "/d", &format!("\"{}\"", dst.display()), "/f"])?;
             let _ = Command::new("explorer.exe").arg(&dst).spawn(); // normal user token, like rs-launcher
         }
-        soft(t!("профиль PowerShell не записан", "PowerShell profile was not written"), profile_install()); // a shell nicety, must not fail the bar install
-        soft(t!("пункт «Закрепить в Пуске» не добавлен", "\"Pin to Start\" menu item was not added"), pin_verb_install(&dst));
+        soft("PowerShell profile was not written", profile_install()); // a shell nicety, must not fail the bar install
+        soft("\"Pin to Start\" menu item was not added", pin_verb_install(&dst));
         Ok(())
     })
 }

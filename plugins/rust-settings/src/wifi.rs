@@ -64,10 +64,10 @@ impl Sec {
         match self {
             Sec::Open | Sec::Owe => Ok(""),
             Sec::Wep { .. } if [5, 13].contains(&key.len()) && key.is_ascii() || hex(10) || hex(26) => Ok("networkKey"),
-            Sec::Wep { .. } => Err(t!("Ключ WEP: 5 или 13 символов (или 10/26 шестнадцатеричных)", "WEP key: 5 or 13 characters (or 10/26 hex digits)").into()),
+            Sec::Wep { .. } => Err("WEP key: 5 or 13 characters (or 10/26 hex digits)".into()),
             Sec::Wpa { .. } | Sec::Wpa2 { .. } if hex(64) => Ok("networkKey"),
             _ if (8..=63).contains(&key.len()) => Ok("passPhrase"),
-            _ => Err(t!("Пароль: от 8 до 63 символов", "Password: 8 to 63 characters").into()),
+            _ => Err("Password: 8 to 63 characters".into()),
         }
     }
 }
@@ -247,7 +247,7 @@ pub fn reason_text(code: u32) -> String {
             return s;
         }
     }
-    tf!("код {}", "code {}", code)
+    format!("code {}", code)
 }
 
 fn xml_escape(s: &str) -> String {
@@ -276,17 +276,17 @@ fn profile_xml(name: &str, raw: &[u8], sec: Sec, key: &str, key_type: &str, hidd
 /// fails, so a wrong password is not kept). Err: a text for the user.
 pub fn add_and_connect(ssid: &str, raw: &[u8], sec: Sec, key: &str, hidden: bool, iface: Option<&GUID>) -> Result<String, String> {
     let kt = sec.key_type(key)?;
-    let Some((c, guid)) = pick(iface) else { return Err(t!("Нет адаптера Wi-Fi", "No Wi-Fi adapter").into()) };
+    let Some((c, guid)) = pick(iface) else { return Err("No Wi-Fi adapter".into()) };
     let mut xml = wide(&profile_xml(ssid, raw, sec, key, kt, hidden));
     let mut reason = 0u32;
     let rc = unsafe { WlanSetProfile(c.0, &guid, 0, xml.as_ptr(), null(), 1, null(), &mut reason) };
     xml.iter_mut().for_each(|w| *w = 0); // the password is in there: not left in freed memory
     if rc != 0 {
-        return Err(if rc == ERROR_ACCESS_DENIED { t!("Windows запретила сохранять сети (политика)", "Windows refused to save networks (policy)").into() } else { tf!("Профиль не принят: {}", "Profile rejected: {}", reason_text(reason)) });
+        return Err(if rc == ERROR_ACCESS_DENIED { "Windows refused to save networks (policy)".into() } else { format!("Profile rejected: {}", reason_text(reason)) });
     }
     if !connect(ssid, &guid) {
         forget(ssid);
-        return Err(t!("Не удалось начать подключение", "Could not start connecting").into());
+        return Err("Could not start connecting".into());
     }
     Ok(ssid.to_string())
 }
@@ -322,23 +322,23 @@ fn eap_user_xml(user: &str, pass: &str) -> String {
 /// Saves an 802.1X profile with the user's credentials and starts connecting. Ok: the profile's name (deleted again if the
 /// connection fails, so wrong credentials are not kept).
 pub fn add_eap_and_connect(ssid: &str, raw: &[u8], auth: &str, user: &str, pass: &str, hidden: bool, iface: Option<&GUID>) -> Result<String, String> {
-    let Some((c, guid)) = pick(iface) else { return Err(t!("Нет адаптера Wi-Fi", "No Wi-Fi adapter").into()) };
+    let Some((c, guid)) = pick(iface) else { return Err("No Wi-Fi adapter".into()) };
     let xml = wide(&eap_profile_xml(ssid, raw, auth, hidden));
     let mut reason = 0u32;
     let rc = unsafe { WlanSetProfile(c.0, &guid, 0, xml.as_ptr(), null(), 1, null(), &mut reason) };
     if rc != 0 {
-        return Err(if rc == ERROR_ACCESS_DENIED { t!("Windows запретила сохранять сети (политика)", "Windows refused to save networks (policy)").into() } else { tf!("Профиль не принят: {}", "Profile rejected: {}", reason_text(reason)) });
+        return Err(if rc == ERROR_ACCESS_DENIED { "Windows refused to save networks (policy)".into() } else { format!("Profile rejected: {}", reason_text(reason)) });
     }
     let mut creds = wide(&eap_user_xml(user, pass));
     let rc = unsafe { WlanSetProfileEapXmlUserData(c.0, &guid, wide(ssid).as_ptr(), 0, creds.as_ptr(), null()) };
     creds.fill(0); // the password is in there: not left in freed memory
     if rc != 0 {
         forget(ssid);
-        return Err(tf!("Не удалось сохранить учётные данные: {}", "Could not save the credentials: {}", reason_text(rc)));
+        return Err(format!("Could not save the credentials: {}", reason_text(rc)));
     }
     if !connect(ssid, &guid) {
         forget(ssid);
-        return Err(t!("Не удалось начать подключение", "Could not start connecting").into());
+        return Err("Could not start connecting".into());
     }
     Ok(ssid.to_string())
 }
@@ -409,7 +409,7 @@ mod tests {
     #[test]
     fn keys_are_checked_before_windows_sees_them() {
         let w = Sec::Wpa2 { tkip: false };
-        assert_eq!(w.key_type("1234567"), Err("Пароль: от 8 до 63 символов".into()));
+        assert_eq!(w.key_type("1234567"), Err("Password: 8 to 63 characters".into()));
         assert_eq!(w.key_type("12345678"), Ok("passPhrase"));
         assert_eq!(w.key_type(&"a".repeat(64)), Ok("networkKey"));
         assert!(w.key_type(&"z".repeat(64)).is_err());

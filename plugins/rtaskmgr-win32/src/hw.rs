@@ -381,7 +381,7 @@ mod tests {
     fn smbios_parser_reads_modules_slots_and_strings() {
         let hw = parse_smbios(&table());
         assert_eq!(hw.slots, 2);
-        assert_eq!(hw.dimms.len(), 1, "пустой слот не считается модулем");
+        assert_eq!(hw.dimms.len(), 1, "an empty slot is not a module");
         let d = &hw.dimms[0];
         assert_eq!((d.size_mb, d.form, d.kind, d.speed, d.cfg_speed), (16384, "SODIMM", "DDR5", 5600, 5600));
         assert_eq!((d.locator.as_str(), d.mfr.as_str()), ("DIMM A", "Samsung"));
@@ -400,7 +400,7 @@ mod tests {
             return; // GitHub's VMs vary: virtual disks without a type, no GPU memory; this checks real machines
         }
         let m = memory_hw();
-        assert!(m.installed_mb() >= 1024, "память из SMBIOS: {m:?}");
+        assert!(m.installed_mb() >= 1024, "memory from SMBIOS: {m:?}");
         assert!(m.slots >= m.dimms.len() as u32);
         let d = disk_info();
         assert!(d.capacity > 10_000_000_000 && d.formatted > 10_000_000_000, "{d:?}");
@@ -411,10 +411,10 @@ mod tests {
         eprintln!("GPU reg: {:?}", g);
         assert!(!g.driver_version.is_empty(), "{g:?}");
         if !crate::perf::static_info().gpu_name.is_empty() {
-            assert!(g.vram > 512 * 1024 * 1024, "видеопамять не прочиталась: {g:?}");
+            assert!(g.vram > 512 * 1024 * 1024, "video memory was not read: {g:?}");
         }
         if let Some(n) = Nvml::new() {
-            let t = n.temp().expect("температура");
+            let t = n.temp().expect("temperature");
             assert!((15..=110).contains(&t), "t={t}");
             eprintln!("GPU temp: {t} °C");
         }

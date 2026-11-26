@@ -46,7 +46,7 @@ fn titles(c: &IUpdateCollection) -> Vec<String> {
 
 fn err_text(e: &windows::core::Error) -> String {
     if e.code().0 as u32 == 0x8007_0005 {
-        t!("Нужны права администратора", "Administrator rights are needed").into()
+        "Administrator rights are needed".into()
     } else {
         e.message()
     }
@@ -72,26 +72,26 @@ fn start(what: &str, done: impl FnOnce() + Send + 'static, job: impl FnOnce() ->
 
 /// Looks for updates.
 pub fn check(done: impl FnOnce() + Send + 'static) {
-    start(t!("Поиск обновлений…", "Checking for updates…"), done, || match session().and_then(|s| search(&s)) {
+    start("Checking for updates…", done, || match session().and_then(|s| search(&s)) {
         Ok(c) => {
             let t = titles(&c);
-            let note = if t.is_empty() { t!("Обновлений нет: установлены все", "You're up to date").into() } else { tf!("Найдено обновлений: {}", "Updates found: {}", t.len()) };
+            let note = if t.is_empty() { "You're up to date".into() } else { format!("Updates found: {}", t.len()) };
             with(|s| s.found = Some(t));
             note
         }
-        Err(e) => tf!("Не удалось проверить: {}", "Could not check: {}", err_text(&e)),
+        Err(e) => format!("Could not check: {}", err_text(&e)),
     });
 }
 
 /// Downloads and installs every update found by `check`.
 pub fn install(done: impl FnOnce() + Send + 'static) {
-    start(t!("Загрузка и установка обновлений…", "Downloading and installing updates…"), done, || {
+    start("Downloading and installing updates…", done, || {
         let run = || -> windows::core::Result<String> {
             unsafe {
                 let s = session()?;
                 let found = search(&s)?;
                 if found.Count()? == 0 {
-                    return Ok(t!("Обновлений нет: установлены все", "You're up to date").into());
+                    return Ok("You're up to date".into());
                 }
                 for i in 0..found.Count()? {
                     let u = found.get_Item(i)?;
@@ -105,7 +105,7 @@ pub fn install(done: impl FnOnce() + Send + 'static) {
                 let inst = s.CreateUpdateInstaller()?;
                 inst.SetUpdates(&found)?;
                 let r = inst.Install()?;
-                Ok(if r.RebootRequired()?.as_bool() { t!("Установлено. Нужна перезагрузка", "Installed. Restart to finish").into() } else { t!("Обновления установлены", "Updates installed").into() })
+                Ok(if r.RebootRequired()?.as_bool() { "Installed. Restart to finish".into() } else { "Updates installed".into() })
             }
         };
         match run() {
@@ -113,7 +113,7 @@ pub fn install(done: impl FnOnce() + Send + 'static) {
                 with(|s| s.found = Some(vec![]));
                 m
             }
-            Err(e) => tf!("Не удалось установить: {}", "Could not install: {}", err_text(&e)),
+            Err(e) => format!("Could not install: {}", err_text(&e)),
         }
     });
 }

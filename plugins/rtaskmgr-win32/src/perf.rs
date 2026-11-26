@@ -435,7 +435,7 @@ mod tests {
 
     #[test]
     fn pdh_counters_work_and_system_info_is_sane() {
-        let mut p = Perf::new().expect("PDH доступен");
+        let mut p = Perf::new().expect("PDH is available");
         std::thread::sleep(std::time::Duration::from_millis(1100));
         let s = p.sample();
         assert!((0.0..=100.0).contains(&s.disk_active));
@@ -445,7 +445,7 @@ mod tests {
         let m = mem_info();
         assert!(m.processes > 10 && m.threads > m.processes && m.commit_limit > 0);
         assert!(uptime_secs() > 10);
-        assert!(!s.disks.is_empty(), "PhysicalDisk(*) должен вернуть хотя бы один диск");
+        assert!(!s.disks.is_empty(), "PhysicalDisk(*) must return at least one disk");
         assert!(s.disks.iter().any(|d| d.letters.contains("C:")), "{:?}", s.disks);
         assert!(s.mem_free > 0 && s.mem_standby > 0, "состав памяти: free={} standby={}", s.mem_free, s.mem_standby);
         eprintln!("disks={:?}\nnics={:?}\ngpus={:?}\nmem mod={}MB standby={}MB free={}MB", s.disks, s.nics.iter().map(|n| &n.name).collect::<Vec<_>>(), s.gpus, s.mem_modified >> 20, s.mem_standby >> 20, s.mem_free >> 20);

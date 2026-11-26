@@ -20,9 +20,9 @@ pub fn size(bytes: u64) -> String {
 /// "73%, on battery" / "100%, plugged in" / "No battery".
 pub fn battery(on_ac: u8, flag: u8, percent: u8) -> String {
     if flag == 128 || flag == 255 || percent > 100 {
-        return t!("Нет батареи", "No battery").into();
+        return "No battery".into();
     }
-    let src = if on_ac == 1 { t!("от сети", "plugged in") } else { t!("от батареи", "on battery") };
+    let src = if on_ac == 1 { "plugged in" } else { "on battery" };
     format!("{percent}%, {src}")
 }
 
@@ -136,9 +136,9 @@ pub fn timeout_text(t: Timeout) -> String {
 
 fn secs_text(s: u32) -> String {
     match s {
-        0 => t!("Никогда", "Never").into(),
-        s if s < 3600 => tf!("{} мин", "{} min", s / 60),
-        s => tf!("{} ч", "{} h", s / 3600),
+        0 => "Never".into(),
+        s if s < 3600 => format!("{} min", s / 60),
+        s => format!("{} h", s / 3600),
     }
 }
 
@@ -171,16 +171,16 @@ mod tests {
 
     #[test]
     fn battery_text_covers_no_battery_and_both_sources() {
-        assert_eq!(battery(1, 128, 255), "Нет батареи");
-        assert_eq!(battery(0, 0, 73), "73%, от батареи");
-        assert_eq!(battery(1, 8, 100), "100%, от сети");
+        assert_eq!(battery(1, 128, 255), "No battery");
+        assert_eq!(battery(0, 0, 73), "73%, on battery");
+        assert_eq!(battery(1, 8, 100), "100%, plugged in");
     }
 
     #[test]
     fn timeout_names() {
-        assert_eq!(secs_text(0), "Никогда");
-        assert_eq!(secs_text(300), "5 мин");
-        assert_eq!(secs_text(3600), "1 ч");
+        assert_eq!(secs_text(0), "Never");
+        assert_eq!(secs_text(300), "5 min");
+        assert_eq!(secs_text(3600), "1 h");
         assert_eq!(STEPS.len(), 10);
     }
 }

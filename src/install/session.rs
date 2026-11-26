@@ -26,16 +26,16 @@ pub(crate) fn parse(out: &str) -> Result<(String, String), String> {
     let mut l = out.lines().map(str::trim).filter(|l| !l.is_empty());
     match (l.next(), l.next()) {
         (Some(a), Some(b)) if i18n::reg::valid_sid(a) && i18n::reg::valid_sid(b) => Ok((a.into(), b.into())),
-        _ => Err(tf!("не удалось определить пользователя сеанса: {}", "could not determine the signed-in user: {}", out.trim())),
+        _ => Err(format!("could not determine the signed-in user: {}", out.trim())),
     }
 }
 
 fn detect() -> Result<Session, String> {
     let (sid, token) = parse(&out("powershell", &["-NoProfile", "-NonInteractive", "-Command", FIND]).map_err(|e| {
-        tf!("не удалось определить пользователя сеанса (нет запущенного explorer.exe, topbar или rust-explorer): {e}", "could not determine the signed-in user (no running explorer.exe, topbar or rust-explorer): {e}")
+        format!("could not determine the signed-in user (no running explorer.exe, topbar or rust-explorer): {e}")
     })?)?;
     if matches!(sid.as_str(), "S-1-5-18" | "S-1-5-19" | "S-1-5-20") {
-        return Err(t!("оболочка сеанса запущена не от обычного пользователя (SYSTEM или служба)", "the session shell does not run as a normal user (SYSTEM or a service)").into());
+        return Err("the session shell does not run as a normal user (SYSTEM or a service)".into());
     }
     Ok(Session { other: sid != token, sid })
 }
@@ -54,7 +54,7 @@ pub(crate) fn init() -> Result<&'static Session, String> {
 /// account's own HKCU is used and the failure becomes a warning.
 pub(crate) fn init_soft() {
     if let Err(e) = init() {
-        soft(t!("пользователь сеанса не определён, настройки пользователя убираются у текущей учётной записи", "signed-in user unknown, per-user settings are removed from the current account"), Err(e));
+        soft("signed-in user unknown, per-user settings are removed from the current account", Err(e));
     }
 }
 
