@@ -10,13 +10,14 @@ pub const CLASS: &str = "RxOptions";
 type Get = fn(&prefs::Prefs) -> bool;
 type Set = fn(&mut prefs::Prefs, bool);
 
-const ROWS: [(&str, &str, Get, Set); 6] = [
+const ROWS: [(&str, &str, Get, Set); 7] = [
     ("Reopen the last tabs", "Start where you left off instead of on Home", |p| p.restore_tabs, |p, v| p.restore_tabs = v),
     ("Type to filter", "Typing in the list filters it, like Ctrl+F", |p| p.type_filter, |p, v| p.type_filter = v),
     ("Filter searches subfolders", "The filter looks through every folder below (Ctrl+E)", |p| p.subfolders, |p, v| p.subfolders = v),
     ("Show hidden files", "Hidden files and folders in lists and searches (Ctrl+H)", |p| p.hidden, |p, v| p.hidden = v),
     ("Folders first", "Keep folders above files whatever the sort", |p| p.folders_first, |p, v| p.folders_first = v),
     ("Recent places", "Folders and files opened lately, at the top of the side pane", |p| p.recents, |p, v| p.recents = v),
+    ("Folder sizes", "Count what is inside each folder: size, folders and files", |p| p.folder_sizes, |p, v| p.folder_sizes = v),
 ];
 const CLEAR: usize = ROWS.len(); // the "Clear recent places" button
 
@@ -106,8 +107,6 @@ unsafe fn paint(h: HWND) {
     fill(dc, b, if hot == CLEAR as i32 { mix(pal().bg, pal().text, 0.14) } else { mix(pal().bg, pal().text, 0.08) }, sc(10));
     SelectObject(dc, f_txt);
     text(dc, "Clear recent places", b, pal().text, DT_CENTER);
-    SelectObject(dc, f_small);
-    text(dc, "Saved in %APPDATA%\\rust-explorer", rc(b.right + sc(14), y, r, y + sc(34)), pal().dim, DT_RIGHT);
     BitBlt(wdc, 0, 0, cr.right, cr.bottom, dc, 0, 0, SRCCOPY);
     SelectObject(dc, of);
     for f in [f_title, f_txt, f_small] { DeleteObject(f); }

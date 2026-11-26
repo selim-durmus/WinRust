@@ -10,14 +10,16 @@ pub struct Prefs {
     pub hidden: bool,        // hidden files (Ctrl+H)
     pub folders_first: bool, // folders above files in every sort
     pub recents: bool,       // recent places in the side pane
-    pub sort_col: usize,     // 0 name, 1 modified, 2 type, 3 size
+    pub sort_col: usize,     // 0 name, 1 modified, 2 type, 3 folders, 4 files, 5 size
     pub sort_asc: bool,
     pub collapsed: Vec<u8>,  // side pane sections folded away
+    pub zoom: usize,         // step of main.rs ZOOM: row height or picture size (Ctrl+wheel)
+    pub folder_sizes: bool,  // count what is inside each folder (Folders / Files / Size columns)
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { restore_tabs: true, type_filter: true, subfolders: false, hidden: false, folders_first: true, recents: true, sort_col: 0, sort_asc: true, collapsed: vec![] }
+        Prefs { restore_tabs: true, type_filter: true, subfolders: false, hidden: false, folders_first: true, recents: true, sort_col: 0, sort_asc: true, collapsed: vec![], zoom: 0, folder_sizes: true }
     }
 }
 
@@ -35,8 +37,10 @@ impl Prefs {
                 "hidden" => p.hidden = b,
                 "folders_first" => p.folders_first = b,
                 "recents" => p.recents = b,
-                "sort_col" => p.sort_col = v.parse().unwrap_or(0usize).min(3),
+                "sort_col" => p.sort_col = v.parse().unwrap_or(0usize).min(5),
                 "sort_asc" => p.sort_asc = b,
+                "folder_sizes" => p.folder_sizes = b,
+                "view_zoom" => p.zoom = v.parse().unwrap_or(0usize), // "zoom" was the older table: ignored
                 "collapsed" => p.collapsed = v.split(',').filter_map(|x| x.trim().parse().ok()).collect(),
                 _ => {}
             }
@@ -48,8 +52,8 @@ impl Prefs {
         let b = |v: bool| if v { "1" } else { "0" };
         let folded: Vec<String> = self.collapsed.iter().map(|c| c.to_string()).collect();
         format!(
-            "restore_tabs={}\ntype_filter={}\nsubfolders={}\nhidden={}\nfolders_first={}\nrecents={}\nsort_col={}\nsort_asc={}\ncollapsed={}\n",
-            b(self.restore_tabs), b(self.type_filter), b(self.subfolders), b(self.hidden), b(self.folders_first), b(self.recents), self.sort_col, b(self.sort_asc), folded.join(",")
+            "restore_tabs={}\ntype_filter={}\nsubfolders={}\nhidden={}\nfolders_first={}\nrecents={}\nsort_col={}\nsort_asc={}\ncollapsed={}\nview_zoom={}\nfolder_sizes={}\n",
+            b(self.restore_tabs), b(self.type_filter), b(self.subfolders), b(self.hidden), b(self.folders_first), b(self.recents), self.sort_col, b(self.sort_asc), folded.join(","), self.zoom, b(self.folder_sizes)
         )
     }
 }
@@ -116,9 +120,9 @@ mod tests {
     #[test]
     fn settings_round_trip_and_defaults() {
         assert_eq!(Prefs::parse(""), Prefs::default());
-        let p = Prefs { restore_tabs: false, subfolders: true, hidden: true, sort_col: 3, sort_asc: false, collapsed: vec![0, 2], ..Prefs::default() };
+        let p = Prefs { restore_tabs: false, subfolders: true, hidden: true, sort_col: 3, sort_asc: false, collapsed: vec![0, 2], zoom: 11, folder_sizes: false, ..Prefs::default() };
         assert_eq!(Prefs::parse(&p.render()), p);
-        assert_eq!(Prefs::parse("sort_col=9\nnonsense\nhidden = true").sort_col, 3);
+        assert_eq!(Prefs::parse("sort_col=9\nnonsense\nhidden = true").sort_col, 5);
         assert!(Prefs::parse("hidden = true").hidden);
     }
 

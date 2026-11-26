@@ -8,7 +8,7 @@
 // Alt+Enter properties, F5 refresh, Ctrl+H hidden files, click a column header to sort, right click on empty space = folder menu.
 // Speed: a folder is listed on a worker thread with FindFirstFileExW (fsx.rs) and shown at once when that takes under
 // 60 ms (nearly always), else when it arrives; a watcher refreshes the folder when something in it changes (selection kept).
-// Filter (bottom bar): typing in the list or Ctrl+F filters the folder as you type; Ctrl+E ("Subfolders") makes it
+// Filter (floating over the list's bottom left corner): typing in the list or Ctrl+F filters the folder as you type; Ctrl+E ("Subfolders") makes it
 // search the whole tree below, crawled once by several threads and then filtered in memory on every key press.
 // Up/Down in the filter move through the list, Enter opens, Esc clears. Ctrl+Shift+F or "? terms" in the address bar =
 // the whole PC through the rust-search service.
@@ -25,11 +25,13 @@
 //   drag-to-position / auto-arrange, items from the public desktop can't be renamed.
 #![windows_subsystem = "windows"]
 use std::{cell::{Cell, RefCell}, env, fs, os::windows::ffi::OsStrExt, path::{Path, PathBuf}, ptr, sync::{Arc, atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::Relaxed}, mpsc}, time::Duration};
-use windows_sys::Win32::{Foundation::*, Graphics::Gdi::{BLACK_BRUSH, GetStockObject, InvalidateRect}, System::LibraryLoader::GetModuleHandleW, UI::{Controls::*, Input::KeyboardAndMouse::{GetKeyState, SetFocus, VK_CONTROL, VK_SHIFT}, Shell::*, WindowsAndMessaging::*}};
+use windows_sys::Win32::{Foundation::*, Graphics::Gdi::{BLACK_BRUSH, GetStockObject, InvalidateRect}, System::LibraryLoader::GetModuleHandleW, UI::{Controls::*, Input::KeyboardAndMouse::{GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_SHIFT}, Shell::*, WindowsAndMessaging::*}};
 
 mod fsx; // fast listing and the subfolder crawl
 mod opts; // the settings page
 mod prefs; // settings, session, recents and bookmarks on disk
+mod sizes; // what is inside each folder, counted in the background
+mod thumbs; // pictures of the icon view, drawn at any zoom
 mod ui; // the look: palette, painted tabs / toolbar / address pill / status line, dark theme
 
 static DESKTOP: AtomicBool = AtomicBool::new(false);
@@ -51,15 +53,12 @@ fn desk_bottom() -> i32 {
     let bar_up = unsafe { !FindWindowW(w("topbar").as_ptr(), ptr::null()).is_null() };
     if bar_up && winrust_common::style::style() == winrust_common::style::Style::Dock { ui::sc(52) } else { ui::sc(8) }
 }
-const THUMB: i32 = 96;
-const WM_THUMB: u32 = WM_APP + 2; // worker -> UI: wp = Box<(era, row, HBITMAP)>
-static GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0); // bumped on every new listing; stale thumbnails are dropped
-static TX: std::sync::OnceLock<std::sync::mpsc::Sender<(u32, usize, PathBuf)>> = std::sync::OnceLock::new();
+static THUMB_PX: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0); // picture size of the icon view (physical px), see ZOOM
 const WM_GO: u32 = WM_APP + 1; // address bar: Enter (wp 13) / Esc (wp 27)
 static EDIT_OLD: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 #[derive(Clone)]
-struct Row { name: String, dir: bool, size: u64, time: u64, icon: i32, thumb: i32 } // time: FILETIME ticks; thumb: -2 not asked, -1 asked, >=0 image-list index
+struct Row { name: String, dir: bool, size: u64, time: u64, icon: i32, sub: (u32, u32), depth: u16, open: bool } // time: FILETIME ticks; icon: system image list index, -1 not asked yet; sub: (folders, files) below a folder, filled from sizes.rs before sorting; depth / open: the tree view
 
 /// Back / forward trail of visited folders (one for the whole window, not per tab).
 #[derive(Default)]
@@ -76,9 +75,9 @@ impl Hist {
 }
 
 // rows: what the list shows (the folder, filtered); all: the whole folder (or the "? " search hits) the filter works on
-struct State { list: HWND, tab: HWND, edit: HWND, dir: PathBuf, rows: Vec<Row>, all: Vec<Row>, thumbs: bool, himl: isize, tabs: Vec<PathBuf>, active: usize, hist: Hist }
+struct State { list: HWND, tab: HWND, edit: HWND, dir: PathBuf, rows: Vec<Row>, all: Vec<Row>, thumbs: bool, view: View, tabs: Vec<PathBuf>, active: usize, hist: Hist }
 thread_local! {
-    static ST: RefCell<State> = RefCell::new(State { list: 0 as _, tab: 0 as _, edit: 0 as _, dir: PathBuf::new(), rows: vec![], all: vec![], thumbs: false, himl: 0, tabs: vec![], active: 0, hist: Hist { v: vec![], pos: 0 } });
+    static ST: RefCell<State> = RefCell::new(State { list: 0 as _, tab: 0 as _, edit: 0 as _, dir: PathBuf::new(), rows: vec![], all: vec![], thumbs: false, view: View::Details, tabs: vec![], active: 0, hist: Hist { v: vec![], pos: 0 } });
     static PREFS: RefCell<prefs::Prefs> = RefCell::new(prefs::Prefs::default());
     static RECENT: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
     static MARKS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
@@ -111,11 +110,11 @@ struct Pending { seq: u32, rx: mpsc::Receiver<Option<Vec<Row>>>, dir: PathBuf, r
 
 fn row(name: String, m: Option<&fs::Metadata>) -> Row {
     use std::os::windows::fs::MetadataExt;
-    Row { name, dir: m.is_some_and(|m| m.is_dir()), size: m.map_or(0, |m| m.len()), time: m.map_or(0, |m| m.last_write_time()), icon: -1, thumb: -2 }
+    Row { name, dir: m.is_some_and(|m| m.is_dir()), size: m.map_or(0, |m| m.len()), time: m.map_or(0, |m| m.last_write_time()), icon: -1, sub: (0, 0), depth: 0, open: false }
 }
 
 /// Folders first (unless turned off in the settings); inside each group by the column (0 name, 1 modified, 2 type,
-/// 3 size), ties by name. The lower-case names are made once per row, not twice per comparison.
+/// 3 folders, 4 files, 5 size), ties by name. The lower-case names are made once per row, not twice per comparison.
 fn sort_rows(rows: &mut Vec<Row>, col: usize, asc: bool) {
     let ff = FOLDERS_FIRST.load(Relaxed);
     let mut keys: Vec<(bool, String, String, usize)> = rows.iter().enumerate().map(|(i, r)| {
@@ -124,7 +123,7 @@ fn sort_rows(rows: &mut Vec<Row>, col: usize, asc: bool) {
     }).collect();
     keys.sort_by(|a, b| {
         let (ra, rb) = (&rows[a.3], &rows[b.3]);
-        let o = match col { 1 => ra.time.cmp(&rb.time), 2 => a.1.cmp(&b.1), 3 => ra.size.cmp(&rb.size), _ => a.2.cmp(&b.2) };
+        let o = match col { 1 => ra.time.cmp(&rb.time), 2 => a.1.cmp(&b.1), 3 => ra.sub.0.cmp(&rb.sub.0), 4 => ra.sub.1.cmp(&rb.sub.1), 5 => ra.size.cmp(&rb.size), _ => a.2.cmp(&b.2) };
         a.0.cmp(&b.0).then(if asc { o } else { o.reverse() }).then_with(|| a.2.cmp(&b.2))
     });
     let mut old: Vec<Option<Row>> = std::mem::take(rows).into_iter().map(Some).collect();
@@ -278,7 +277,7 @@ fn rows_of(dir: &PathBuf) -> Option<Vec<Row>> {
             if !hidden && f.attr & fsx::HIDDEN != 0 { return; }
             let name = String::from_utf16_lossy(f.name);
             let name = if n == 0 { name } else { d.join(name).to_string_lossy().into_owned() };
-            rows.push(Row { name, dir: f.attr & fsx::DIR != 0, size: f.size, time: f.time, icon: -1, thumb: -2 });
+            rows.push(Row { name, dir: f.attr & fsx::DIR != 0, size: f.size, time: f.time, icon: -1, sub: (0, 0), depth: 0, open: false });
         });
         if !ok && n == 0 { return None; }
     }
@@ -333,12 +332,16 @@ fn commit(h: HWND, dir: PathBuf, rows: Vec<Row>, record: bool) {
     ui::nav_dirty(); // the pane highlights where we are
     if desk() {
         let (list, n) = ST.with_borrow_mut(|st| { st.rows = st.all.clone(); (st.list, st.rows.len()) });
-        reset_thumbs();
         put(list, LVM_DELETEALLITEMS, 0, 0);
         desk::fill(list, n);
         return;
     }
+    if same { tree_refresh(); } else { tree_forget(); }
     if !same {
+        // what is inside each folder: counted in the background (a recent count is reused). Not on a refresh of the
+        // same folder: that would restart counts still running, and a busy folder would never finish
+        if PREFS.with_borrow(|p| p.folder_sizes) { sizes::ask(ST.with_borrow(|st| st.all.iter().filter(|r| r.dir).map(|r| dir.join(&r.name)).collect())); }
+        thumbs::clear(); // the pictures of the folder left behind
         filter_clear();
         watch(h, &dir);
         remember(dir.clone());
@@ -367,8 +370,8 @@ fn show(h: HWND, keep: &[String], top: isize) {
     let (text, sub) = FILT.with_borrow(|f| (f.text.clone(), f.sub));
     let terms: Vec<String> = text.to_lowercase().split_whitespace().map(String::from).collect();
     let (mut total, mut capped, mut scanning, mut scanned, mut flipped) = (0, false, false, 0, None);
-    let mut rows: Vec<Row> = if terms.is_empty() {
-        ST.with_borrow(|st| st.all.clone())
+    let rows: Vec<Row> = if terms.is_empty() {
+        ST.with_borrow(|st| if st.view == View::Tree && !ui::searching() { tree_rows(&st.dir, &st.all) } else { st.all.clone() })
     } else if !sub || ui::searching() {
         let pick = |terms: &[String]| ST.with_borrow(|st| st.all.iter().filter(|r| { let n = r.name.rsplit('\\').next().unwrap_or(""); terms.iter().all(|t| fsx::contains_ci(n, t)) }).cloned().collect::<Vec<_>>());
         let mut v = pick(&terms);
@@ -391,17 +394,15 @@ fn show(h: HWND, keep: &[String], top: isize) {
         (total, capped, scanning, scanned) = (n, n > hits.len(), !c.is_done(), t.len());
         let mut v: Vec<Row> = hits.iter().map(|&i| {
             let (dir, size, time) = t.meta(i);
-            Row { name: t.path(&c.root, i).to_string_lossy().into_owned(), dir, size, time, icon: -1, thumb: -2 }
+            Row { name: t.path(&c.root, i).to_string_lossy().into_owned(), dir, size, time, icon: -1, sub: (0, 0), depth: 0, open: false }
         }).collect();
         drop(t);
         sort_rows(&mut v, SORT_COL.load(Relaxed), SORT_ASC.load(Relaxed));
         v
     };
-    rows.iter_mut().for_each(|r| r.thumb = -2); // the thumbnail list is emptied below
     FILT.with_borrow_mut(|f| { f.total = total; f.capped = capped; f.scanning = scanning; f.scanned = scanned; f.flipped = flipped; });
     let n = rows.len();
     let list = ST.with_borrow_mut(|st| { st.rows = rows; st.list });
-    reset_thumbs();
     put(list, LVM_DELETEALLITEMS, 0, 0);
     put(list, LVM_SETITEMCOUNT, n, LVSICF_NOSCROLL as isize);
     let set = |i: usize, state: u32| {
@@ -555,7 +556,7 @@ fn toggle_sub(h: HWND) {
 
 fn filter_cue() {
     let (e, sub) = FILT.with_borrow(|f| (f.edit as HWND, f.sub));
-    let cue = if sub { "Search this folder and all below  (Ctrl+F)" } else { "Filter this folder  (Ctrl+F)" };
+    let cue = if sub { "Filter all below\u{2026}" } else { "Filter\u{2026}" }; // the glyph next to it says the rest
     if !e.is_null() { put(e, 0x1501, 1, w(cue).as_ptr() as isize); } // EM_SETCUEBANNER, shown while focused too
 }
 
@@ -632,6 +633,8 @@ fn set_prefs(h: HWND, f: impl FnOnce(&mut prefs::Prefs), reload_now: bool) {
     filter_cue();
     ui::nav_rebuild();
     if reload_now { reload(h); }
+    // folder totals just turned on: counted for the folder shown (ones already known are not counted again)
+    if p.folder_sizes && !desk() { let d = cur_dir(); sizes::ask(ST.with_borrow(|st| st.all.iter().filter(|r| r.dir).map(|r| d.join(&r.name)).collect())); }
 }
 
 fn prefs_now() -> prefs::Prefs { PREFS.with_borrow(|p| p.clone()) }
@@ -754,13 +757,6 @@ fn local_search(dir: &Path, q: &str) -> (Vec<Row>, bool, bool) {
     if out.is_empty() && !other.is_empty() { (other, cut, true) } else { (out, cut, false) }
 }
 
-/// Drops all thumbnails and invalidates in-flight ones; call whenever the rows are replaced.
-fn reset_thumbs() {
-    GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let himl = ST.with_borrow(|st| st.himl);
-    unsafe { ImageList_Remove(himl as _, -1) };
-}
-
 fn reload(h: HWND) { load(h, cur_dir()); }
 
 /// (list, current dir, full paths of the selected rows)
@@ -816,11 +812,198 @@ fn tab_close_at(h: HWND, i: usize) {
     save_session();
 }
 
+/// How the list shows the folder. The zoom (Ctrl+wheel) walks them in this order, like File Pilot.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum View { Details, Tree, List, Icons }
+
+/// Zoom steps, smallest first: details (rows never grow), the tree, the list, then pictures growing in small steps
+/// from medium through large to extra large icons (logical pixels). Ctrl+wheel and Ctrl+Plus / Minus walk them one at a
+/// time; the view button and Ctrl+M jump between details and the pictures; nothing is reloaded at any step.
+const ZOOM: [(View, i32); 22] = [
+    (View::Details, ROW_PX), (View::Tree, ROW_PX), (View::List, ROW_PX),
+    (View::Icons, 48), (View::Icons, 52), (View::Icons, 56), (View::Icons, 62), (View::Icons, 68), (View::Icons, 74),
+    (View::Icons, 80), (View::Icons, 88), (View::Icons, 96), (View::Icons, 104), (View::Icons, 114), (View::Icons, 124),
+    (View::Icons, 136), (View::Icons, 150), (View::Icons, 166), (View::Icons, 184), (View::Icons, 208), (View::Icons, 232),
+    (View::Icons, 256),
+];
+const ZOOM_DETAILS: usize = 0;
+const ROW_PX: i32 = 27; // details and tree rows: compact, the size they keep
+const ZOOM_ICONS: usize = 11; // 96 px pictures
+thread_local! {
+    static ZOOM_AT: Cell<usize> = const { Cell::new(ZOOM_DETAILS) };
+    static ZOOM_LAST_ICONS: Cell<usize> = const { Cell::new(ZOOM_ICONS) }; // for the toggle
+    static SHOWN: Cell<f32> = const { Cell::new(0.0) }; // picture size on screen now (logical px), gliding to the step's
+}
+const ZOOM_TIMER: usize = 9;
+
+/// Name of the view at the current zoom, for the status line: Details, Tree, List, M / L / XL Icons.
+pub fn view_name() -> &'static str {
+    match ZOOM[ZOOM_AT.get()] {
+        (View::Details, _) => "Details",
+        (View::Tree, _) => "Tree",
+        (View::List, _) => "List",
+        (View::Icons, s) if s < 96 => "M Icons",
+        (View::Icons, s) if s < 184 => "L Icons",
+        _ => "XL Icons",
+    }
+}
+
+/// Shows the list at zoom step `i`. Between two picture sizes the size glides over a few frames (zoom_tick); a change of
+/// view jumps. `refresh` = not the first layout (save, repaint).
+fn set_zoom(h: HWND, i: usize, refresh: bool) {
+    let i = i.min(ZOOM.len() - 1);
+    let (view, size) = ZOOM[i];
+    ZOOM_AT.set(i);
+    if view == View::Icons { ZOOM_LAST_ICONS.set(i); }
+    let (list, was) = ST.with_borrow(|st| (st.list, st.view));
+    if !refresh || was != view || SHOWN.get() == 0.0 {
+        unsafe { KillTimer(h, ZOOM_TIMER) };
+        ST.with_borrow_mut(|st| { st.view = view; st.thumbs = view == View::Icons; });
+        SHOWN.set(size as f32);
+        apply_size(list, view, size as f32);
+        put(list, LVM_SETVIEW, match view { View::Icons => LV_VIEW_ICON, View::List => LV_VIEW_LIST, _ => LV_VIEW_DETAILS } as usize, 0);
+        if view == View::List { put(list, LVM_SETCOLUMNWIDTH, 0, ui::sc(300) as isize); } // the width of each name
+        if refresh {
+            // the tree has rows of its own (the open folders' contents): into it or out of it, the rows are made again
+            if was == View::Tree || view == View::Tree { let (keep, top) = kept(); show(h, &keep, top); }
+            after_resize(list);
+        }
+    } else {
+        unsafe { SetTimer(h, ZOOM_TIMER, 15, None) };
+    }
+    if refresh {
+        PREFS.with_borrow_mut(|p| p.zoom = i);
+        prefs::save(&prefs_now());
+        unsafe { ui::status_dirty(h) };
+        ui::zoom_pop_show(); // the slider shows where the zoom is, like File Pilot's
+    }
+}
+
+/// (zoom step, number of steps), for the status corner and the slider.
+pub fn zoom_at() -> (usize, usize) { (ZOOM_AT.get(), ZOOM.len()) }
+
+/// One frame of the picture-size glide: a good part of the way to the step's size, until it is there.
+fn zoom_tick(h: HWND) {
+    let (view, target) = ZOOM[ZOOM_AT.get()];
+    let target = target as f32;
+    let mut s = SHOWN.get();
+    s += (target - s) * 0.45;
+    if (target - s).abs() < 0.75 {
+        s = target;
+        unsafe { KillTimer(h, ZOOM_TIMER) };
+    }
+    SHOWN.set(s);
+    let list = ST.with_borrow(|st| st.list);
+    apply_size(list, view, s);
+    after_resize(list);
+}
+
+/// Lays the list out for `view` at size `s` (logical px; only the pictures have a size of their own). Nothing is listed
+/// or asked for again; the rows are drawn by hand.
+fn apply_size(list: HWND, view: View, s: f32) {
+    match view {
+        View::Icons => {
+            let px = (s * ui::sc(100) as f32 / 100.0).round() as i32;
+            if px != THUMB_PX.load(Relaxed) {
+                // an empty image list of the picture size only makes the list lay its cells out that big: the pictures
+                // themselves are drawn by hand (thumbs.rs), scaled
+                put(list, LVM_SETIMAGELIST, LVSIL_NORMAL as usize, ui::sized_list(1, px, px));
+                THUMB_PX.store(px, Relaxed);
+            }
+            let cx = (px + ui::sc(24)).max(ui::sc(92)); // narrow pictures still leave room for the name
+            put(list, LVM_SETICONSPACING, 0, ((px + ui::sc(52)) as isize) << 16 | cx as isize);
+            ui::row_height(list, false);
+        }
+        View::List => ui::row_height(list, false),
+        View::Details | View::Tree => {
+            ui::set_row(s.round() as i32);
+            ui::row_height(list, true); // also has the rows measured again
+        }
+    }
+}
+
+/// After a size change: the focused row stays in view, the columns fit, one repaint (no erase: no flash).
+fn after_resize(list: HWND) {
+    if matches!(ST.with_borrow(|st| st.view), View::Details | View::Tree) { unsafe { ui::fit_columns(list) }; }
+    let f = put(list, LVM_GETNEXTITEM, usize::MAX, LVNI_FOCUSED as isize);
+    if f >= 0 { put(list, LVM_ENSUREVISIBLE, f as usize, 0); }
+    unsafe { InvalidateRect(list, ptr::null(), 0) };
+}
+
+fn zoom_by(h: HWND, d: i32) {
+    let i = (ZOOM_AT.get() as i32 + d).clamp(0, ZOOM.len() as i32 - 1) as usize;
+    if i != ZOOM_AT.get() { set_zoom(h, i, true); }
+}
+
+/// Details <-> pictures (at the size last used).
 fn toggle_view(h: HWND) {
-    let (list, on) = ST.with_borrow_mut(|st| { st.thumbs = !st.thumbs; (st.list, st.thumbs) });
-    ui::row_height(list, !on);
-    put(list, LVM_SETVIEW, if on { LV_VIEW_ICON } else { LV_VIEW_DETAILS } as usize, 0);
-    reload(h);
+    set_zoom(h, if ZOOM[ZOOM_AT.get()].0 == View::Icons { ZOOM_DETAILS } else { ZOOM_LAST_ICONS.get() }, true);
+}
+
+// ---------- the tree view: folders opened in place ----------
+
+thread_local! {
+    static OPEN: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new()); // open folders (lower-case full paths)
+    static KIDS: RefCell<std::collections::HashMap<String, Vec<Row>>> = RefCell::new(std::collections::HashMap::new()); // their rows
+}
+
+fn tkey(p: &Path) -> String { p.to_string_lossy().trim_end_matches('\\').to_lowercase() }
+
+/// The rows of the tree: each row of `top`, and under an open folder its own rows, one level deeper. Names stay relative
+/// to the shown folder ("sub\file"), so everything that joins a row's name onto the folder keeps working.
+fn tree_rows(dir: &Path, top: &[Row]) -> Vec<Row> {
+    fn walk(out: &mut Vec<Row>, dir: &Path, prefix: &str, rows: &[Row], depth: u16) {
+        for r in rows {
+            let mut x = r.clone();
+            x.depth = depth;
+            if !prefix.is_empty() { x.name = format!("{prefix}\\{}", r.name); }
+            let k = tkey(&dir.join(&x.name));
+            x.open = r.dir && OPEN.with_borrow(|o| o.contains(&k));
+            let (open, name) = (x.open, x.name.clone());
+            out.push(x);
+            if open {
+                let kids = KIDS.with_borrow(|m| m.get(&k).cloned()).unwrap_or_default();
+                walk(out, dir, &name, &kids, depth + 1);
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(top.len());
+    walk(&mut out, dir, "", top, 0);
+    out
+}
+
+/// Opens or closes folder row `i` of the tree (closing also closes everything open inside it).
+fn tree_toggle(h: HWND, i: usize) {
+    let Some((full, is_dir)) = ST.with_borrow(|st| st.rows.get(i).map(|r| (st.dir.join(&r.name), r.dir))) else { return };
+    if !is_dir { return; }
+    let k = tkey(&full);
+    if OPEN.with_borrow(|o| o.contains(&k)) {
+        let inside = format!("{k}\\");
+        OPEN.with_borrow_mut(|o| o.retain(|x| x != &k && !x.starts_with(&inside)));
+    } else {
+        let Some(kids) = rows_of(&full) else { return }; // unreadable: stays closed
+        if PREFS.with_borrow(|p| p.folder_sizes) { sizes::more(kids.iter().filter(|r| r.dir).map(|r| full.join(&r.name)).collect()); }
+        KIDS.with_borrow_mut(|m| m.insert(k.clone(), kids));
+        OPEN.with_borrow_mut(|o| o.insert(k));
+    }
+    let (keep, top) = kept();
+    show(h, &keep, top);
+}
+
+/// The open folders read again (the shown folder changed on disk, or the sort changed).
+fn tree_refresh() {
+    let open: Vec<String> = OPEN.with_borrow(|o| o.iter().cloned().collect());
+    for k in open {
+        match rows_of(&PathBuf::from(&k)) {
+            Some(rows) => KIDS.with_borrow_mut(|m| m.insert(k, rows)),
+            None => { OPEN.with_borrow_mut(|o| o.remove(&k)); None }
+        };
+    }
+}
+
+fn tree_forget() {
+    OPEN.with_borrow_mut(|o| o.clear());
+    KIDS.with_borrow_mut(|m| m.clear());
 }
 
 /// Address box in search mode ("? terms").
@@ -917,46 +1100,6 @@ mod sh {
                 }
             }
             fo.PerformOperations()
-        }
-    }
-
-    /// Background thumbnail loader: GetImage for each (era, row, path) asked for, result posted to the main window.
-    pub fn start_thumbs(main: isize) -> std::sync::mpsc::Sender<(u32, usize, PathBuf)> {
-        let (tx, rx) = std::sync::mpsc::channel::<(u32, usize, PathBuf)>();
-        std::thread::spawn(move || unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            for (era, row, path) in rx {
-                if era != super::GEN.load(std::sync::atomic::Ordering::Relaxed) { continue; }
-                let Ok(f) = SHCreateItemFromParsingName::<_, _, IShellItemImageFactory>(PCWSTR(wide(&path).as_ptr()), None) else { continue };
-                let Ok(bmp) = f.GetImage(SIZE { cx: super::THUMB, cy: super::THUMB }, SIIGBF_BIGGERSIZEOK) else { continue };
-                let padded = pad(bmp.0);
-                windows_sys::Win32::Graphics::Gdi::DeleteObject(bmp.0 as _);
-                if padded.is_null() { continue; }
-                let b = Box::new((era, row, padded as isize));
-                let _ = PostMessageW(Some(HWND(main as *mut c_void)), super::WM_THUMB, WPARAM(Box::into_raw(b) as usize), LPARAM(0));
-            }
-        });
-        tx
-    }
-
-    /// Centers `src` (any size up to THUMB, 32-bit with alpha) on a transparent THUMB x THUMB bitmap: ImageList_Add needs exact sizes.
-    unsafe fn pad(src: *mut c_void) -> *mut c_void {
-        use windows_sys::Win32::Graphics::Gdi::*;
-        unsafe {
-            let t = super::THUMB;
-            let mut bm: BITMAP = std::mem::zeroed();
-            GetObjectW(src as _, size_of::<BITMAP>() as i32, &mut bm as *mut _ as _);
-            let mut bi: BITMAPINFO = std::mem::zeroed();
-            bi.bmiHeader = BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: t, biHeight: -t, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB, ..std::mem::zeroed() };
-            let mut bits = std::ptr::null_mut();
-            let dst = CreateDIBSection(std::ptr::null_mut(), &bi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
-            if dst.is_null() { return std::ptr::null_mut(); }
-            let (dc, sdc) = (CreateCompatibleDC(std::ptr::null_mut()), CreateCompatibleDC(std::ptr::null_mut()));
-            let (o1, o2) = (SelectObject(dc, dst), SelectObject(sdc, src as _));
-            BitBlt(dc, (t - bm.bmWidth) / 2, (t - bm.bmHeight) / 2, bm.bmWidth, bm.bmHeight, sdc, 0, 0, SRCCOPY);
-            SelectObject(dc, o1); SelectObject(sdc, o2);
-            DeleteDC(dc); DeleteDC(sdc);
-            dst
         }
     }
 
@@ -1397,8 +1540,13 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                     PREFS.set(p);
                     RECENT.set(prefs::read_paths("recent.txt"));
                     MARKS.set(prefs::read_paths("bookmarks.txt"));
-                    // the filter box in the bottom bar
-                    let fe = CreateWindowExW(0, w("EDIT").as_ptr(), ptr::null(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL as u32, 0, 0, 0, 0, h, 0 as _, inst, ptr::null());
+                    // floating over the list's bottom corners: the filter (its box inside), the status; the zoom slider
+                    let float = WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+                    let fbar = CreateWindowExW(0, w("RxFilter").as_ptr(), ptr::null(), float | WS_VISIBLE, 0, 0, 0, 0, h, 0 as _, inst, ptr::null());
+                    let sbar = CreateWindowExW(0, w("RxStatus").as_ptr(), ptr::null(), float | WS_VISIBLE, 0, 0, 0, 0, h, 0 as _, inst, ptr::null());
+                    let pop = CreateWindowExW(0, w("RxZoomPop").as_ptr(), ptr::null(), float, 0, 0, 0, 0, h, 0 as _, inst, ptr::null());
+                    ui::overlays_set(fbar, sbar, pop);
+                    let fe = CreateWindowExW(0, w("EDIT").as_ptr(), ptr::null(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL as u32, 0, 0, 0, 0, fbar, 0 as _, inst, ptr::null());
                     put(fe, WM_SETFONT, ui::font(14, 400, ui::ui_face()) as usize, 1);
                     FILT_OLD.store(SetWindowLongPtrW(fe, GWLP_WNDPROC, filter_proc as *const () as isize), Relaxed);
                     FILT.with_borrow_mut(|f| f.edit = fe as isize);
@@ -1406,7 +1554,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                     ui::nav_rebuild();
                 }
                 let view = if desk() { LVS_ICON } else { LVS_REPORT };
-                let list = CreateWindowExW(0, w("SysListView32").as_ptr(), ptr::null(), WS_CHILD | WS_VISIBLE | view | if desk() { 0 } else { LVS_OWNERDATA } | LVS_EDITLABELS | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS, 0, 0, 0, 0, h, 0 as _, inst, ptr::null());
+                let list = CreateWindowExW(0, w("SysListView32").as_ptr(), ptr::null(), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | view | if desk() { 0 } else { LVS_OWNERDATA } | LVS_EDITLABELS | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS, 0, 0, 0, 0, h, 0 as _, inst, ptr::null());
                 put(list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER) as isize);
                 let mut fi: SHFILEINFOW = std::mem::zeroed();
                 let il = SHGetFileInfoW(w("C:\\").as_ptr(), 0, &mut fi, size_of::<SHFILEINFOW>() as u32, SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
@@ -1429,14 +1577,14 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                     CreateWindowExW(0, w("SHELLDLL_DefView").as_ptr(), ptr::null(), WS_CHILD, 0, 0, 0, 0, h, 0 as _, inst, ptr::null());
                     SetTimer(h, 7, 2000, None); // live wallpaper on / off (desk::check_live)
                 } else {
-                    let himl = ImageList_Create(THUMB, THUMB, ILC_COLOR32, 64, 64);
-                    put(list, LVM_SETIMAGELIST, LVSIL_NORMAL as usize, himl as isize);
-                    put(list, LVM_SETICONSPACING, 0, ((THUMB as isize + 34) << 16) | (THUMB as isize + 24));
-                    let _ = TX.set(sh::start_thumbs(h as isize));
-                    ST.with_borrow_mut(|st| st.himl = himl as isize);
+                    thumbs::start(h as isize);
+                    sizes::start(h as isize);
                     // the same columns, in the same order, as Explorer's details view
-                    col(list, 0, "Name", ui::sc(360), false); col(list, 1, "Date modified", ui::sc(160), false); col(list, 2, "Type", ui::sc(140), false); col(list, 3, "Size", ui::sc(96), true);
+                    // the same columns as Explorer's details view, plus what is inside each folder (sizes.rs), like File Pilot
+                    for (i, (t, wd)) in [("Name", 360), ("Date modified", 150), ("Type", 120), ("Folders", 76), ("Files", 76), ("Size", 96)].into_iter().enumerate() { col(list, i as i32, t, ui::sc(wd), false); }
+                    ST.with_borrow_mut(|st| st.list = list);
                     ui::style_list(list);
+                    set_zoom(h, prefs_now().zoom, false); // the size last used
                 }
                 // the tabs to start with: the folder asked for, else (setting on) the tabs open when the last window closed, else Home
                 let home = env::var_os("USERPROFILE").map_or_else(|| PathBuf::from("C:\\"), PathBuf::from);
@@ -1481,7 +1629,6 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                 }
                 0
             }
-            WM_PAINT if !desk() => { ui::paint_status(h); 0 }
             ui::WM_UI => {
                 match wp {
                     1 => { let n = ST.with_borrow(|st| st.tabs.len()); if (lp as usize) < n { tab_select(h, lp as usize); } }
@@ -1501,6 +1648,10 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                     22 => nav_menu(h, lp as usize),
                     23 => { if let Some((p, _)) = ui::nav_item(lp as usize) { open_in_new_tab(h, p); } } // middle click
                     24 => set_prefs(h, |p| { let s = lp as u8; if let Some(i) = p.collapsed.iter().position(|&c| c == s) { p.collapsed.remove(i); } else { p.collapsed.push(s); } }, false),
+                    25 => zoom_by(h, lp as i32), // Ctrl+wheel over the list: lp = steps (+ bigger)
+                    26 => tree_toggle(h, lp as usize), // the arrow of a folder in the tree
+                    27 => toggle_sub(h), // the "Subfolders" glyph in the filter bar
+                    28 => set_zoom(h, lp as usize, true), // a step picked on the zoom slider
                     _ => {}
                 }
                 0
@@ -1553,19 +1704,28 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                 }
                 0
             }
-            WM_CTLCOLOREDIT if lp as HWND == filter_edit() => {
-                let dc = wp as windows_sys::Win32::Graphics::Gdi::HDC;
-                windows_sys::Win32::Graphics::Gdi::SetTextColor(dc, ui::pal().text);
-                windows_sys::Win32::Graphics::Gdi::SetBkColor(dc, ui::pill());
-                ui::pill_brush()
+            // no title bar of the system's: the client starts at the window's top (the tabs are the title bar). The sides
+            // and the bottom keep their resizing frame; maximized, the part Windows pushes off screen is given back
+            WM_NCCALCSIZE if !desk() && wp != 0 => {
+                let p = &mut *(lp as *mut NCCALCSIZE_PARAMS);
+                let top = p.rgrc[0].top;
+                let r = DefWindowProcW(h, m, wp, lp);
+                p.rgrc[0].top = top;
+                if IsZoomed(h) != 0 { p.rgrc[0].top += GetSystemMetrics(SM_CYFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER); }
+                r
             }
-            WM_LBUTTONDOWN if !desk() => {
-                match ui::bottom_hit(h, (lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32) {
-                    1 => toggle_sub(h),
-                    2 => filter_focus(None),
-                    _ => {}
+            // the empty parts of the tab row drag the window (and double-click maximizes); its top edge resizes
+            WM_NCHITTEST if !desk() => {
+                let r = DefWindowProcW(h, m, wp, lp);
+                if r != HTCLIENT as isize { return r; }
+                let mut p = POINT { x: (lp & 0xFFFF) as i16 as i32, y: ((lp >> 16) & 0xFFFF) as i16 as i32 };
+                windows_sys::Win32::Graphics::Gdi::ScreenToClient(h, &mut p);
+                let mut cr: RECT = std::mem::zeroed();
+                GetClientRect(h, &mut cr);
+                if IsZoomed(h) == 0 && p.y < ui::sc(5) {
+                    return if p.x < ui::sc(12) { HTTOPLEFT } else if p.x > cr.right - ui::sc(12) { HTTOPRIGHT } else { HTTOP } as isize;
                 }
-                0
+                if p.y < ui::sc(ui::TAB_H) { HTCAPTION as isize } else { r }
             }
             WM_DESTROY if !desk() => {
                 save_session();
@@ -1596,20 +1756,17 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                         ST.with(|c| {
                             let Ok(mut st) = c.try_borrow_mut() else { return };
                             let State { dir, rows, thumbs, .. } = &mut *st;
+                            let thumbs = *thumbs;
                             let Some(i) = usize::try_from(it.iItem).ok() else { return };
                             let Some(r) = rows.get_mut(i) else { return };
                             if it.mask & LVIF_TEXT != 0 && it.cchTextMax > 0 {
-                                let s = match it.iSubItem { 0 => shown_name(&r.name, desk()), 1 => date_text(r.time), 2 => type_text(&r.name, r.dir), _ if r.dir => String::new(), _ => size_text(r.size) };
+                                let s = match it.iSubItem { 0 if !desk() => r.name.rsplit('\\').next().unwrap_or(&r.name).to_string(), 0 => shown_name(&r.name, desk()), 1 => date_text(r.time), 2 => type_text(&r.name, r.dir), _ if r.dir => String::new(), _ => size_text(r.size) };
                                 let u: Vec<u16> = s.encode_utf16().take(it.cchTextMax as usize - 1).collect();
                                 ptr::copy_nonoverlapping(u.as_ptr(), it.pszText, u.len());
                                 *it.pszText.add(u.len()) = 0;
                             }
-                            if it.mask & LVIF_IMAGE != 0 && *thumbs {
-                                if r.thumb == -2 {
-                                    r.thumb = -1;
-                                    if let Some(tx) = TX.get() { let _ = tx.send((GEN.load(std::sync::atomic::Ordering::Relaxed), i, dir.join(&r.name))); }
-                                }
-                                it.iImage = if r.thumb >= 0 { r.thumb } else { I_IMAGENONE };
+                            if it.mask & LVIF_IMAGE != 0 && thumbs {
+                                it.iImage = 0; // a cell of the picture size; the picture is drawn by ui::list_draw
                             } else if it.mask & LVIF_IMAGE != 0 {
                                 if r.icon < 0 { r.icon = icon_of(&dir.join(&r.name), r.dir); }
                                 it.iImage = r.icon;
@@ -1630,12 +1787,16 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                         SORT_ASC.store(asc, Relaxed);
                         if !desk() { set_prefs(h, |p| { p.sort_col = c; p.sort_asc = asc; }, false); }
                         let n = ST.with_borrow_mut(|st| {
+                            // folder totals counted so far take part in the sort
+                            let d = st.dir.clone();
+                            for r in st.rows.iter_mut().chain(st.all.iter_mut()).filter(|r| r.dir) {
+                                if let Some(s) = sizes::get(&d.join(&r.name)) { r.size = s.bytes; r.sub = (s.dirs, s.files); }
+                            }
                             sort_rows(&mut st.rows, c, asc);
                             sort_rows(&mut st.all, c, asc);
-                            st.rows.iter_mut().for_each(|r| r.thumb = -2); // rows moved: thumbnails are asked for again
+                            if st.view == View::Tree { tree_refresh(); } // each open folder sorted on its own (rows_of sorts)
                             st.rows.len()
                         });
-                        reset_thumbs();
                         put(list, LVM_REDRAWITEMS, 0, n as isize - 1);
                     }
                     LVN_BEGINDRAG => {
@@ -1664,8 +1825,31 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                                 0x45 if ctrl => { toggle_sub(h); return 0; } // Ctrl+E: the filter searches subfolders too
                                 0x44 if ctrl => { toggle_mark(h, dir.clone()); return 0; } // Ctrl+D: bookmark this folder
                                 0xBC if ctrl => { opts::open(h); return 0; } // Ctrl+,: settings
+                                0xBB | 0x6B if ctrl => { zoom_by(h, 1); return 0; } // Ctrl+Plus: bigger
+                                0xBD | 0x6D if ctrl => { zoom_by(h, -1); return 0; } // Ctrl+Minus: smaller
+                                0x30 | 0x60 if ctrl => { set_zoom(h, ZOOM_DETAILS, true); return 0; } // Ctrl+0: the usual details
                                 0x1B if filtering() => { filter_clear(); show(h, &[], 0); return 0; } // Esc: the filter goes
                                 0x48 if ctrl => { set_prefs(h, |p| p.hidden = !p.hidden, true); return 0; } // Ctrl+H: hidden files
+                                // tree: Right opens the folder, Left closes it or goes to the folder it is in
+                                0x27 | 0x25 if ST.with_borrow(|st| st.view) == View::Tree => {
+                                    let i = put(list, LVM_GETNEXTITEM, usize::MAX, LVNI_FOCUSED as isize);
+                                    let row = usize::try_from(i).ok().and_then(|i| ST.with_borrow(|st| st.rows.get(i).map(|r| (r.dir, r.open, r.name.clone()))));
+                                    if let Some((is_dir, open, name)) = row {
+                                        if vk == 0x27 && is_dir && !open { tree_toggle(h, i as usize); }
+                                        else if vk == 0x25 && open { tree_toggle(h, i as usize); }
+                                        else if vk == 0x25 {
+                                            if let Some((parent, _)) = name.rsplit_once('\\') {
+                                                let p = ST.with_borrow(|st| st.rows.iter().position(|r| r.name == parent));
+                                                if let Some(p) = p {
+                                                    put(list, LVM_SETITEMSTATE, usize::MAX, &LVITEMW { stateMask: LVIS_SELECTED, state: 0, ..std::mem::zeroed() } as *const _ as isize);
+                                                    put(list, LVM_SETITEMSTATE, p, &LVITEMW { stateMask: LVIS_SELECTED | LVIS_FOCUSED, state: LVIS_SELECTED | LVIS_FOCUSED, ..std::mem::zeroed() } as *const _ as isize);
+                                                    put(list, LVM_ENSUREVISIBLE, p, 0);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    return 0;
+                                }
                                 _ => {}
                             }
                         }
@@ -1718,6 +1902,8 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                 }
                 0
             }
+            // the Back / Forward keys of some keyboards (the mouse buttons are taken in the message loop)
+            WM_APPCOMMAND if !desk() && matches!((lp >> 16) & 0x0FFF, 1 | 2) => { nav(h, (lp >> 16) & 0x0FFF == 1); 1 }
             WM_SETFOCUS => { SetFocus(ST.with_borrow(|st| st.list)); 0 }
             WM_APP => { reload(h); 0 }
             WM_NAV => {
@@ -1729,15 +1915,9 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                 }
                 0
             }
-            WM_THUMB => {
-                let (era, row, bmp) = *Box::from_raw(wp as *mut (u32, usize, isize));
-                let (list, himl) = ST.with_borrow(|st| (st.list, st.himl));
-                if era == GEN.load(std::sync::atomic::Ordering::Relaxed) {
-                    let idx = ImageList_Add(himl as _, bmp as _, ptr::null_mut());
-                    let ok = idx >= 0 && ST.with_borrow_mut(|st| st.rows.get_mut(row).map(|r| r.thumb = idx).is_some());
-                    if ok { put(list, LVM_REDRAWITEMS, row, row as isize); }
-                }
-                windows_sys::Win32::Graphics::Gdi::DeleteObject(bmp as _);
+            sizes::WM_SIZES => { InvalidateRect(ST.with_borrow(|st| st.list), ptr::null(), 0); 0 }
+            thumbs::WM_PIC => {
+                if thumbs::store(wp) { InvalidateRect(ST.with_borrow(|st| st.list), ptr::null(), 0); }
                 0
             }
             WM_GO => {
@@ -1756,6 +1936,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                 0
             }
             desk::SPAWN_WORKERW if desk() => { desk::spawn_workerw(h); 0 }
+            WM_TIMER if !desk() && wp == ZOOM_TIMER => { zoom_tick(h); 0 }
             WM_TIMER if desk() && wp == 7 => { desk::check_live(ST.with_borrow(|st| st.list)); 0 }
             WM_DESTROY => { PostQuitMessage(0); 0 }
             _ => DefWindowProcW(h, m, wp, lp),
@@ -1779,6 +1960,9 @@ fn main() {
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(ui::proc), hInstance: inst, lpszClassName: w("RxChrome").as_ptr(), hCursor: LoadCursorW(0 as _, IDC_ARROW), ..std::mem::zeroed() });
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(ui::nav_proc), hInstance: inst, lpszClassName: w("RxNav").as_ptr(), hCursor: LoadCursorW(0 as _, IDC_ARROW), ..std::mem::zeroed() });
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(opts::proc), hInstance: inst, lpszClassName: w(opts::CLASS).as_ptr(), hCursor: LoadCursorW(0 as _, IDC_ARROW), ..std::mem::zeroed() });
+        for (name, f) in [("RxFilter", ui::filter_bar_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT), ("RxStatus", ui::status_bar_proc), ("RxZoomPop", ui::zoom_pop_proc)] {
+            RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(f), hInstance: inst, lpszClassName: w(name).as_ptr(), hCursor: LoadCursorW(0 as _, IDC_ARROW), ..std::mem::zeroed() });
+        }
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(proc), hInstance: inst, lpszClassName: cls.as_ptr(), hCursor: LoadCursorW(0 as _, IDC_ARROW), hbrBackground: bg, ..std::mem::zeroed() });
         if desktop {
             DESKTOP.store(true, Relaxed);
@@ -1792,7 +1976,9 @@ fn main() {
             let d = CreateWindowExW(WS_EX_TOOLWINDOW, pm.as_ptr(), w("rs-desktop").as_ptr(), WS_POPUP, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), 0 as _, 0 as _, inst, ptr::null());
             SetWindowPos(d, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         } else {
-            CreateWindowExW(0, cls.as_ptr(), ptr::null(), WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, ui::sc(1000), ui::sc(660), 0 as _, 0 as _, inst, ptr::null());
+            let main = CreateWindowExW(0, cls.as_ptr(), ptr::null(), WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, ui::sc(1000), ui::sc(660), 0 as _, 0 as _, inst, ptr::null());
+            // measure the frame again now that WM_NCCALCSIZE takes the title bar away
+            SetWindowPos(main, ptr::null_mut(), 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
         let mut msg = std::mem::zeroed();
         while GetMessageW(&mut msg, 0 as _, 0, 0) > 0 {
@@ -1800,6 +1986,21 @@ fn main() {
             if msg.message == WM_SYSKEYDOWN && !desk() {
                 let act = match msg.wParam { 0x25 => 1, 0x27 => 2, 0x0D => 3, 0x26 => 4, _ => 0 };
                 if act != 0 { PostMessageW(GetAncestor(msg.hwnd, GA_ROOT), WM_NAV, act, 0); continue; }
+            }
+            // a click anywhere else lets go of the address box (the side pane and the toolbar never take the focus
+            // themselves, so it used to stay there); a click on the box itself puts it back right after
+            if !desk() && matches!(msg.message, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_NCLBUTTONDOWN) {
+                let (edit, list) = ST.with(|c| c.try_borrow().map(|s| (s.edit, s.list)).unwrap_or((0 as _, 0 as _)));
+                if !edit.is_null() && GetFocus() == edit && msg.hwnd != edit { SetFocus(list); }
+            }
+            // the mouse's side buttons, over any part of the window (list, side pane, toolbar, title bar): back / forward.
+            // Taken here, before the child under the pointer sees them, so they also make no WM_APPCOMMAND (one step each).
+            if !desk() && matches!(msg.message, WM_XBUTTONDOWN | WM_XBUTTONUP | WM_NCXBUTTONDOWN | WM_NCXBUTTONUP) {
+                if matches!(msg.message, WM_XBUTTONUP | WM_NCXBUTTONUP) {
+                    let act = match (msg.wParam >> 16) & 0xFFFF { 1 => 1, 2 => 2, _ => 0 }; // XBUTTON1 = back, XBUTTON2 = forward
+                    if act != 0 { PostMessageW(GetAncestor(msg.hwnd, GA_ROOT), WM_NAV, act, 0); }
+                }
+                continue;
             }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
@@ -1812,7 +2013,7 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn r(name: &str, dir: bool, size: u64, time: u64) -> Row { Row { name: name.into(), dir, size, time, icon: -1, thumb: -2 } }
+    fn r(name: &str, dir: bool, size: u64, time: u64) -> Row { Row { name: name.into(), dir, size, time, icon: -1, sub: (0, 0), depth: 0, open: false } }
     fn names(v: &[Row]) -> Vec<&str> { v.iter().map(|r| r.name.as_str()).collect() }
 
     #[test]
