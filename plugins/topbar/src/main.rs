@@ -1857,7 +1857,9 @@ unsafe fn bar_step(hwnd: HWND) {
     let now = now_ms();
     let dt = now.saturating_sub(BAR_T.replace(now)).min(50) as f32;
     let p = BAR_P.get();
-    let p = if p < target { (p + dt / 380.0).min(target) } else { (p - dt / 240.0).max(target) };
+    // brought by an open panel (Start from the Win key), it rises as fast as the panel fades in (220 ms)
+    let rise = if fly::any_open() { 220.0 } else { 380.0 };
+    let p = if p < target { (p + dt / rise).min(target) } else { (p - dt / 240.0).max(target) };
     BAR_P.set(p);
     if p > 0.0 && IsWindowVisible(hwnd) == 0 {
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -3256,7 +3258,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             InvalidateRect(hwnd, null(), 0);
         }
         WM_TIMER if wp == 5 => bar_step(hwnd),
-        WIN_START => fly::toggle(fly::Kind::Start),
+        WIN_START => {
+            fly::toggle(fly::Kind::Start);
+            fs_update(hwnd); // a hidden bar rises with Start now, not at the next tick of the 250 ms watch
+        }
         ALT_TAB => alt_tab(wp == 1),
         ALT_UP => alt_done(wp == 1),
         SNIP if wp == 1 => screenshot_notice(hwnd),
