@@ -8,7 +8,7 @@
 //! The same frame clock drives the side pane's and the title bar's animations (`frames`).
 #![allow(unsafe_op_in_unsafe_fn)]
 use super::*;
-use std::{collections::HashMap, sync::atomic::{AtomicIsize, AtomicU32}, time::Instant};
+use std::{collections::HashMap, sync::atomic::{AtomicIsize, AtomicU32, AtomicU64}, time::Instant};
 use ui::{mix, pal, sc};
 use windows::{
     core::{Interface, PCWSTR},
@@ -64,8 +64,7 @@ fn wake_event() -> HANDLE {
                 }
                 let on = ON.load(Relaxed);
                 for s in 0..3 {
-                    let bit = 1 << s;
-                    if on & bit != 0 && PEND.fetch_or(bit, Relaxed) & bit == 0 { PostMessageW(SLOT_WND[s].load(Relaxed) as HWND, WM_FRAME, 0, 0); }
+                    if on & (1 << s) != 0 { post_frame(s); }
                 }
             }
         });
@@ -85,6 +84,31 @@ pub fn frames(slot: usize, h: HWND, on: bool) {
 
 /// The frame posted to `slot` is being handled (the next refresh may post another).
 pub fn frame_done(slot: usize) { PEND.fetch_and(!(1 << slot), Relaxed); }
+
+static POSTED_AT: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)]; // ms (since_start) of each slot's last post
+/// A frame still not handled after this long is posted again.
+const LOST_MS: u64 = 250;
+
+fn since_start() -> u64 {
+    static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    T0.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// Posts a frame to `slot`'s window, unless one is already on its way. One that never arrived (its post failed, or
+/// it went missing in some modal loop) no longer blocks the slot forever: the list stopped drawing for good, showing
+/// the folder before while the address and the status line moved on. It is posted again once it is LOST_MS old, and
+/// a post that fails starts the frame clock, which tries again at the next refresh. (A second frame is harmless.)
+fn post_frame(slot: usize) {
+    let bit = 1 << slot;
+    let now = since_start();
+    if PEND.fetch_or(bit, Relaxed) & bit != 0 && now.saturating_sub(POSTED_AT[slot].load(Relaxed)) < LOST_MS { return; }
+    POSTED_AT[slot].store(now, Relaxed);
+    let h = SLOT_WND[slot].load(Relaxed) as HWND;
+    if unsafe { PostMessageW(h, WM_FRAME, 0, 0) } == 0 {
+        PEND.fetch_and(!bit, Relaxed);
+        if !h.is_null() { frames(slot, h, true); }
+    }
+}
 
 fn animate(on: bool) { frames(SLOT_LIST, hwnd(), on); }
 
@@ -450,8 +474,7 @@ fn clamp() {
 
 /// Draws once more (no animation running: right away, through the message queue).
 pub fn invalidate() {
-    let h = hwnd();
-    if !h.is_null() && PEND.fetch_or(1 << SLOT_LIST, Relaxed) & (1 << SLOT_LIST) == 0 { unsafe { PostMessageW(h, WM_FRAME, 0, 0) }; }
+    if !hwnd().is_null() { post_frame(SLOT_LIST); }
 }
 
 /// Glide toward `goal`.
