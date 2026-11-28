@@ -837,14 +837,13 @@ pub fn folder_row_at(x: i32, y: i32) -> Option<(usize, PathBuf)> {
     ST.with(|c| c.try_borrow().ok().and_then(|s| s.rows.get(i).filter(|r| r.dir).map(|r| (i, s.dir.join(&r.name)))))
 }
 
-/// Does what the file menu left to the window: rename in the list, WinRust's pins, the bookmark.
+/// Does what the file menu left to the window: rename in the list, delete, WinRust's pins, what's using it.
 fn menu_choice(h: HWND, c: sh::Choice, paths: &[PathBuf]) {
     match c {
         sh::Choice::Rename => rename_selected(),
         sh::Choice::Delete => { let _ = sh::fileop(h, sh::Op::Delete, paths, &cur_dir()); }
         sh::Choice::PinStart => paths.iter().for_each(|p| bar_pin(0x5753_5450, "--pin-start", p)),
         sh::Choice::PinBar => paths.iter().for_each(|p| bar_pin(0x5753_5442, "--pin-bar", p)),
-        sh::Choice::Bookmark => if let Some(p) = paths.first() { toggle_mark(h, p.clone()) },
         sh::Choice::Locks => unsafe { inuse::show(h, paths) },
         sh::Choice::Done => {}
     }
@@ -1581,10 +1580,9 @@ mod sh {
 
     /// What a menu choice leaves to the window (the shell did everything else).
     #[derive(PartialEq, Clone, Copy)]
-    pub enum Choice { Done, Rename, Delete, PinStart, PinBar, Bookmark, Locks }
+    pub enum Choice { Done, Rename, Delete, PinStart, PinBar, Locks }
     const MY_START: u32 = 0x9001;
     const MY_BAR: u32 = 0x9002;
-    const MY_MARK: u32 = 0x9003;
     const MY_LOCKS: u32 = 0x9004;
 
     /// Forwards owner-draw / init-popup menu messages so submenus like "Send to" get filled in.
@@ -1618,21 +1616,19 @@ mod sh {
                 String::from_utf16_lossy(&b[..b.iter().position(|&c| c == 0).unwrap_or(0)]).to_lowercase()
             };
             let mut items = crate::menu::from_hmenu(menu.0 as _, &msg, &verb);
-            // WinRust's own: the bar's Start panel and taskbar (Windows' pins are left out), a bookmark for a folder;
-            // before "Send to"
+            // WinRust's own: the bar's Start panel and taskbar (Windows' pins are left out) and who holds it open, after
+            // the shell's items; Properties comes last, under them (stray separators are dropped by the menu)
             use crate::menu::Item;
-            let mut ours = vec![Item::new(MY_START, "\u{E718}", "Pin to Start", ""), Item::new(MY_BAR, "\u{E718}", "Pin to taskbar", "")];
-            if paths.len() == 1 && paths[0].is_dir() { ours.push(Item::new(MY_MARK, if super::marked(&paths[0]) { "\u{E735}" } else { "\u{E734}" }, if super::marked(&paths[0]) { "Remove bookmark" } else { "Bookmark" }, "Ctrl+D")); }
-            ours.push(Item::new(MY_LOCKS, "\u{E72E}", "What's using this?", "")); // which programs have it open (inuse.rs)
-            ours.push(Item::sep());
-            let at = items.iter().position(|i| !i.sub.is_empty() && i.text.eq_ignore_ascii_case("send to")).map_or(items.len(), |i| i.saturating_sub(1).max(1).min(items.len()));
-            items.splice(at..at, ours);
+            let props = items.iter().position(|i| i.sub.is_empty() && !i.sep && verb(i.id) == "properties").map(|i| items.remove(i));
+            items.extend([Item::sep(), Item::new(MY_START, "\u{E718}", "Pin to Start", ""), Item::new(MY_BAR, "\u{E718}", "Pin to taskbar", "")]);
+            items.push(Item::new(MY_LOCKS, "\u{E72E}", "What's using this?", "")); // which programs have it open (inuse.rs)
+            if let Some(p) = props { items.extend([Item::sep(), p]); }
             let mut pt = POINT::default();
             GetCursorPos(&mut pt)?;
             let id = crate::menu::track(h as _, items, (pt.x, pt.y));
             let mut rename = Choice::Done;
             if id >= MY_START {
-                rename = match id { MY_START => Choice::PinStart, MY_BAR => Choice::PinBar, MY_LOCKS => Choice::Locks, _ => Choice::Bookmark };
+                rename = match id { MY_START => Choice::PinStart, MY_BAR => Choice::PinBar, MY_LOCKS => Choice::Locks, _ => Choice::Done };
             } else if id > 0 {
                 if verb(id) == "rename" {
                     rename = Choice::Rename; // renaming happens in our list, not through the shell
