@@ -56,16 +56,43 @@ pub(crate) fn log(s: &str) {
 }
 
 /// Copies over an exe that was just killed: taskkill returns before Windows (or an antivirus scan) releases the file, so retry ~6 s.
+/// A process can also stay stuck while it closes (dead, one thread left waiting in a driver) and keep its exe locked for
+/// as long as Windows runs. Then the old exe is moved aside (`name.exe.old-<time>`: a running exe may be renamed, not
+/// overwritten) and the new one copied in; the leftovers are deleted on a later install, once nothing holds them.
 pub(crate) fn put(src: &Path, dst: &Path) -> Result<(), String> {
+    let in_use = |r: &std::io::Result<()>| matches!(r, Err(e) if e.raw_os_error() == Some(32) || e.raw_os_error() == Some(5));
+    remove_moved_aside(dst);
     let mut r = fs::copy(src, dst).map(|_| ());
     for _ in 0..30 {
-        if !matches!(&r, Err(e) if e.raw_os_error() == Some(32) || e.raw_os_error() == Some(5)) {
+        if !in_use(&r) {
             break;
         }
         thread::sleep(std::time::Duration::from_millis(200));
         r = fs::copy(src, dst).map(|_| ());
     }
+    if in_use(&r) && dst.is_file() {
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let aside = dst.with_file_name(format!("{}.old-{t}", dst.file_name().unwrap_or_default().to_string_lossy()));
+        if fs::rename(dst, &aside).is_ok() {
+            log(&format!("{}: in use, the old one moved aside to {}", dst.display(), aside.display()));
+            r = fs::copy(src, dst).map(|_| ());
+            if r.is_err() {
+                let _ = fs::rename(&aside, dst); // the new one did not go in: the old one back where it was
+            }
+        }
+    }
     r.map_err(|e| format!("{}: {e}", dst.display()))
+}
+
+/// Deletes the copies of `dst` that `put` moved aside before (those still locked stay for the next time).
+fn remove_moved_aside(dst: &Path) {
+    let (Some(dir), Some(name)) = (dst.parent(), dst.file_name()) else { return };
+    let prefix = format!("{}.old-", name.to_string_lossy()).to_lowercase();
+    for e in fs::read_dir(dir).into_iter().flatten().flatten() {
+        if e.file_name().to_string_lossy().to_lowercase().starts_with(&prefix) {
+            let _ = fs::remove_file(e.path());
+        }
+    }
 }
 
 pub(crate) fn reg_dword(key: &str, name: &str) -> Option<u32> {

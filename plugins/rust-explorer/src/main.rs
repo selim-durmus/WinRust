@@ -29,6 +29,8 @@ use windows_sys::Win32::{Foundation::*, Graphics::Gdi::{BLACK_BRUSH, GetStockObj
 
 mod fsx; // fast listing and the subfolder crawl
 mod glist; // the GPU-drawn list (smooth scrolling), being built
+mod inuse; // our own "File in use" window: which program has it open, end it, try again
+mod locks; // who has a file or folder open (Restart Manager + the system's handle table), ending them
 mod menu; // our own right-click menu
 mod opts; // the settings page
 mod prefs; // settings, session, recents and bookmarks on disk
@@ -843,6 +845,7 @@ fn menu_choice(h: HWND, c: sh::Choice, paths: &[PathBuf]) {
         sh::Choice::PinStart => paths.iter().for_each(|p| bar_pin(0x5753_5450, "--pin-start", p)),
         sh::Choice::PinBar => paths.iter().for_each(|p| bar_pin(0x5753_5442, "--pin-bar", p)),
         sh::Choice::Bookmark => if let Some(p) = paths.first() { toggle_mark(h, p.clone()) },
+        sh::Choice::Locks => unsafe { inuse::show(h, paths) },
         sh::Choice::Done => {}
     }
 }
@@ -1357,9 +1360,16 @@ mod sh {
         true
     }
 
-    /// Notes where each item of a file operation ended up, for Undo.
+    /// Notes where each item of a file operation ended up, for Undo, and the items that failed (with why).
     #[implement(IFileOperationProgressSink)]
-    struct Sink { moved: RefCell<Vec<(PathBuf, PathBuf)>>, copied: RefCell<Vec<PathBuf>>, recycled: RefCell<Vec<PathBuf>> }
+    #[derive(Default)]
+    struct Sink { moved: RefCell<Vec<(PathBuf, PathBuf)>>, copied: RefCell<Vec<PathBuf>>, recycled: RefCell<Vec<PathBuf>>, failed: RefCell<Vec<(PathBuf, HRESULT)>> }
+
+    impl Sink {
+        fn failed(&self, hr: HRESULT, it: Ref<IShellItem>) {
+            if hr.is_err() { if let Some(p) = it.ok().ok().and_then(path_of) { self.failed.borrow_mut().push((p, hr)); } }
+        }
+    }
 
     impl IFileOperationProgressSink_Impl for Sink_Impl {
         fn StartOperations(&self) -> Result<()> { Ok(()) }
@@ -1369,17 +1379,20 @@ mod sh {
         fn PreMoveItem(&self, _: u32, _: Ref<IShellItem>, _: Ref<IShellItem>, _: &PCWSTR) -> Result<()> { Ok(()) }
         fn PostMoveItem(&self, _: u32, it: Ref<IShellItem>, _: Ref<IShellItem>, _: &PCWSTR, hr: HRESULT, new: Ref<IShellItem>) -> Result<()> {
             if hr.is_ok() { if let (Some(was), Some(now)) = (it.ok().ok().and_then(path_of), new.ok().ok().and_then(path_of)) { self.moved.borrow_mut().push((now, was)); } }
+            self.failed(hr, it);
             Ok(())
         }
         fn PreCopyItem(&self, _: u32, _: Ref<IShellItem>, _: Ref<IShellItem>, _: &PCWSTR) -> Result<()> { Ok(()) }
-        fn PostCopyItem(&self, _: u32, _: Ref<IShellItem>, _: Ref<IShellItem>, _: &PCWSTR, hr: HRESULT, new: Ref<IShellItem>) -> Result<()> {
+        fn PostCopyItem(&self, _: u32, it: Ref<IShellItem>, _: Ref<IShellItem>, _: &PCWSTR, hr: HRESULT, new: Ref<IShellItem>) -> Result<()> {
             if hr.is_ok() { if let Some(now) = new.ok().ok().and_then(path_of) { self.copied.borrow_mut().push(now); } }
+            self.failed(hr, it);
             Ok(())
         }
         fn PreDeleteItem(&self, _: u32, _: Ref<IShellItem>) -> Result<()> { Ok(()) }
-        fn PostDeleteItem(&self, _: u32, _: Ref<IShellItem>, hr: HRESULT, new: Ref<IShellItem>) -> Result<()> {
+        fn PostDeleteItem(&self, _: u32, it: Ref<IShellItem>, hr: HRESULT, new: Ref<IShellItem>) -> Result<()> {
             // recycled: `new` is the item inside the Recycle Bin (deleted for good: none)
             if hr.is_ok() { if let Some(p) = new.ok().ok().and_then(path_of) { self.recycled.borrow_mut().push(p); } }
+            self.failed(hr, it);
             Ok(())
         }
         fn PreNewItem(&self, _: u32, _: Ref<IShellItem>, _: &PCWSTR) -> Result<()> { Ok(()) }
@@ -1426,34 +1439,71 @@ mod sh {
 
     fn wide(p: &PathBuf) -> Vec<u16> { p.as_os_str().encode_wide().chain([0]).collect() }
 
+    /// The copy engine's "a program has it open": the item itself (COPYENGINE_E_SHARING_VIOLATION_SRC), something inside
+    /// a folder or at the destination (_DEST), or the plain Windows sharing / lock violation.
+    fn in_use(hr: HRESULT) -> bool { matches!(hr.0 as u32, 0x8027_0027 | 0x8027_0028 | 0x8007_0020 | 0x8007_0021) }
+
+    /// The user said no (a confirmation, a prompt): nothing to do again.
+    fn cancelled(hr: HRESULT) -> bool { matches!(hr.0 as u32, 0x8027_0000 | 0x8027_0001 | 0x8007_04C7) }
+
     /// Copy / move into `to`, or recycle. Must not be called while ST is borrowed (the shell pumps messages).
+    /// Items a program has open are not left to the shell's "File in use" prompt: our own window (inuse.rs) says which
+    /// program it is, can end it, and the items are tried again.
     pub fn fileop(h: *mut c_void, op: Op, from: &[PathBuf], to: &PathBuf) -> Result<()> {
-        unsafe {
-            let fo: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL)?;
-            fo.SetOwnerWindow(HWND(h))?;
-            fo.SetOperationFlags(match op { Op::Delete => FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE, Op::Purge => FILEOPERATION_FLAGS(0), _ => FOF_RENAMEONCOLLISION })?;
-            // where everything ends up is noted, for Ctrl+Z
-            let sink: IFileOperationProgressSink = Sink { moved: RefCell::new(vec![]), copied: RefCell::new(vec![]), recycled: RefCell::new(vec![]) }.into();
-            let cookie = fo.Advise(&sink).ok();
-            let item = |p: &PathBuf| SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(wide(p).as_ptr()), None);
-            let dest = if matches!(op, Op::Delete | Op::Purge) { None } else { Some(item(to)?) };
-            for p in from {
-                let it = item(p)?;
-                match (op, &dest) {
-                    (Op::Copy, Some(d)) => fo.CopyItem(&it, d, PCWSTR::null(), None)?,
-                    (Op::Move, Some(d)) => fo.MoveItem(&it, d, PCWSTR::null(), None)?,
-                    _ => fo.DeleteItem(&it, None)?,
+        let sink: IFileOperationProgressSink = Sink::default().into();
+        let mut items = from.to_vec();
+        let r = loop {
+            let (r, stuck) = perform(h, op, &items, to, &sink);
+            if stuck.is_empty() { break r; }
+            // for a copy or move, what is in the way may be the file of the same name where it is going
+            let mut look = stuck.clone();
+            if matches!(op, Op::Copy | Op::Move) { look.extend(stuck.iter().filter_map(|p| p.file_name().map(|n| to.join(n))).filter(|p| p.exists())); }
+            let verb = match op { Op::Copy => "copied", Op::Move => "moved", _ => "deleted" };
+            if !unsafe { crate::inuse::ask(h as _, &stuck, look, verb) } { break r; }
+            items = stuck;
+        };
+        // where everything ends up is noted, for Ctrl+Z (one entry for the whole action, retries included)
+        let s = unsafe { sink.as_impl() };
+        let (moved, copied, recycled) = (s.moved.take(), s.copied.take(), s.recycled.take());
+        if !moved.is_empty() { push_undo(Undo::Moved(moved)); }
+        if !copied.is_empty() { push_undo(Undo::Copied(copied)); }
+        if !recycled.is_empty() { push_undo(Undo::Recycled(recycled)); }
+        r
+    }
+
+    /// One run of the operation. It runs without the shell's error windows (FOF_NOERRORUI: the shell's own
+    /// confirmations still come); items failing for another reason than "in use" (one needing admin rights, say) are done
+    /// again with the shell's windows, so it can ask as it always does. Returns the items a program has open.
+    fn perform(h: *mut c_void, op: Op, from: &[PathBuf], to: &PathBuf, sink: &IFileOperationProgressSink) -> (Result<()>, Vec<PathBuf>) {
+        let once = |items: &[PathBuf], quiet: bool| -> Result<()> {
+            unsafe {
+                let fo: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL)?;
+                fo.SetOwnerWindow(HWND(h))?;
+                let flags = match op { Op::Delete => FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE, Op::Purge => FILEOPERATION_FLAGS(0), _ => FOF_RENAMEONCOLLISION };
+                fo.SetOperationFlags(if quiet { flags | FOF_NOERRORUI } else { flags })?;
+                let cookie = fo.Advise(sink).ok();
+                let item = |p: &PathBuf| SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(wide(p).as_ptr()), None);
+                let dest = if matches!(op, Op::Delete | Op::Purge) { None } else { Some(item(to)?) };
+                for p in items {
+                    let Ok(it) = item(p) else { continue }; // gone meanwhile
+                    match (op, &dest) {
+                        (Op::Copy, Some(d)) => fo.CopyItem(&it, d, PCWSTR::null(), None)?,
+                        (Op::Move, Some(d)) => fo.MoveItem(&it, d, PCWSTR::null(), None)?,
+                        _ => fo.DeleteItem(&it, None)?,
+                    }
                 }
+                let r = fo.PerformOperations();
+                if let Some(c) = cookie { let _ = fo.Unadvise(c); }
+                r
             }
-            let r = fo.PerformOperations();
-            if let Some(c) = cookie { let _ = fo.Unadvise(c); }
-            let s = sink.as_impl();
-            let (moved, copied, recycled) = (s.moved.take(), s.copied.take(), s.recycled.take());
-            if !moved.is_empty() { push_undo(Undo::Moved(moved)); }
-            if !copied.is_empty() { push_undo(Undo::Copied(copied)); }
-            if !recycled.is_empty() { push_undo(Undo::Recycled(recycled)); }
-            r
-        }
+        };
+        let r = once(from, true);
+        let failed = unsafe { sink.as_impl() }.failed.take();
+        let (stuck, other): (Vec<_>, Vec<_>) = failed.into_iter().filter(|f| !cancelled(f.1)).partition(|f| in_use(f.1));
+        let other: Vec<PathBuf> = other.into_iter().map(|f| f.0).collect();
+        let r = if other.is_empty() { r } else { once(&other, false) };
+        unsafe { sink.as_impl() }.failed.take();
+        (r, stuck.into_iter().map(|f| f.0).collect())
     }
 
     /// Puts `paths` on the system clipboard like Explorer: the shell's own data object plus the "Preferred DropEffect"
@@ -1531,10 +1581,11 @@ mod sh {
 
     /// What a menu choice leaves to the window (the shell did everything else).
     #[derive(PartialEq, Clone, Copy)]
-    pub enum Choice { Done, Rename, Delete, PinStart, PinBar, Bookmark }
+    pub enum Choice { Done, Rename, Delete, PinStart, PinBar, Bookmark, Locks }
     const MY_START: u32 = 0x9001;
     const MY_BAR: u32 = 0x9002;
     const MY_MARK: u32 = 0x9003;
+    const MY_LOCKS: u32 = 0x9004;
 
     /// Forwards owner-draw / init-popup menu messages so submenus like "Send to" get filled in.
     pub fn menu_msg(m: u32, wp: usize, lp: isize) -> bool {
@@ -1572,6 +1623,7 @@ mod sh {
             use crate::menu::Item;
             let mut ours = vec![Item::new(MY_START, "\u{E718}", "Pin to Start", ""), Item::new(MY_BAR, "\u{E718}", "Pin to taskbar", "")];
             if paths.len() == 1 && paths[0].is_dir() { ours.push(Item::new(MY_MARK, if super::marked(&paths[0]) { "\u{E735}" } else { "\u{E734}" }, if super::marked(&paths[0]) { "Remove bookmark" } else { "Bookmark" }, "Ctrl+D")); }
+            ours.push(Item::new(MY_LOCKS, "\u{E72E}", "What's using this?", "")); // which programs have it open (inuse.rs)
             ours.push(Item::sep());
             let at = items.iter().position(|i| !i.sub.is_empty() && i.text.eq_ignore_ascii_case("send to")).map_or(items.len(), |i| i.saturating_sub(1).max(1).min(items.len()));
             items.splice(at..at, ours);
@@ -1580,7 +1632,7 @@ mod sh {
             let id = crate::menu::track(h as _, items, (pt.x, pt.y));
             let mut rename = Choice::Done;
             if id >= MY_START {
-                rename = match id { MY_START => Choice::PinStart, MY_BAR => Choice::PinBar, _ => Choice::Bookmark };
+                rename = match id { MY_START => Choice::PinStart, MY_BAR => Choice::PinBar, MY_LOCKS => Choice::Locks, _ => Choice::Bookmark };
             } else if id > 0 {
                 if verb(id) == "rename" {
                     rename = Choice::Rename; // renaming happens in our list, not through the shell
@@ -2460,6 +2512,8 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
 }
 
 fn main() {
+    // started as admin from the "File in use" window to end a program or stop a service: do it and quit
+    if let Some(code) = locks::helper() { std::process::exit(code); }
     // a panic ends the window (it happens inside a window procedure); what it was is kept in %TEMP%\rx-panic.log
     std::panic::set_hook(Box::new(|info| {
         use std::io::Write;
@@ -2486,6 +2540,7 @@ fn main() {
         // the menu's windows cast a shadow (CS_DROPSHADOW)
         RegisterClassW(&WNDCLASSW { style: 0x0002_0000, lpfnWndProc: Some(menu::proc), hInstance: inst, lpszClassName: w(menu::CLASS).as_ptr(), hCursor: LoadCursorW(0 as _, IDC_ARROW), ..std::mem::zeroed() });
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(opts::proc), hInstance: inst, lpszClassName: w(opts::CLASS).as_ptr(), hCursor: LoadCursorW(0 as _, IDC_ARROW), ..std::mem::zeroed() });
+        RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(inuse::proc), hInstance: inst, lpszClassName: w(inuse::CLASS).as_ptr(), hCursor: LoadCursorW(0 as _, IDC_ARROW), ..std::mem::zeroed() });
         for (name, f) in [("RxFilter", ui::filter_bar_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT), ("RxStatus", ui::status_bar_proc), ("RxZoomPop", ui::zoom_pop_proc)] {
             RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(f), hInstance: inst, lpszClassName: w(name).as_ptr(), hCursor: LoadCursorW(0 as _, IDC_ARROW), ..std::mem::zeroed() });
         }
