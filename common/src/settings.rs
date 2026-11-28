@@ -1,7 +1,7 @@
-//! Opens a Settings page (`ms-settings:...`). Settings is a Store app: it opens only while Explorer is the shell (activation
-//! fails with 0x80040900 otherwise, also with a shell window of our own registered). So with rust-explorer in place of Explorer:
-//! start Explorer for as long as Settings is open, then end it again, which keeps the RAM saving. Done by a hidden PowerShell:
-//! it waits for processes, a hook or UI thread must not. Shared by Win+I (reshell) and the topbar's menus.
+//! Opens a Settings page (`ms-settings:...`). Settings is a Store app: its window only shows while a Store app host runs
+//! (Explorer, or Windows' ShellAppRuntime.exe: crate::shell::ensure_app_host). Without either (a Windows build without that
+//! host) the old way remains: start Explorer for as long as Settings is open, then end it again. Done by a hidden
+//! PowerShell (`PS`): it waits for processes, a hook or UI thread must not. Shared by Win+I (reshell) and the topbar's menus.
 use std::{os::windows::process::CommandExt, process::{Command, Stdio}};
 
 const PS: &str = r#"
@@ -74,23 +74,36 @@ fn own_exe() -> Option<std::path::PathBuf> {
     exe.is_file().then_some(exe)
 }
 
-/// `uri` is passed through the environment, never spliced into the script. A second call while the first still waits is harmless.
-pub fn open(uri: &str) {
+/// A rust-settings page, or Windows' Settings (`open_windows`). The returned thread is the one opening Windows' Settings:
+/// a caller that exits right away (`topbar --open`) waits for it.
+pub fn open(uri: &str) -> Option<std::thread::JoinHandle<()>> {
     if let (Some(page), Some(exe)) = (own_page(uri), own_exe()) {
         if Command::new(exe).arg(page).stdin(Stdio::null()).creation_flags(0x0800_0000).spawn().is_ok() {
-            return;
+            return None;
         }
     }
-    open_windows(uri);
+    Some(open_windows(uri))
 }
 
 /// Always Windows' own Settings, also for the pages rust-settings has (the Start search: someone who looks up
-/// "Installed apps" wants the full Windows page, with Store apps, sizes and app options).
-pub fn open_windows(uri: &str) {
-    // the Explorer start is shared (crate::shell: the normal user token, also from the elevated bar)
-    let ps = PS.replace("__START_EXPLORER__", crate::shell::START_EXPLORER_PS);
-    let _ = Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps])
-        .env("WR_URI", uri).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(0x0800_0000).spawn();
+/// "Installed apps" wants the full Windows page, with Store apps, sizes and app options). On its own thread: the host
+/// may have to start first (crate::shell::ensure_app_host).
+pub fn open_windows(uri: &str) -> std::thread::JoinHandle<()> {
+    let uri = uri.to_string();
+    std::thread::spawn(move || {
+        if crate::shell::ensure_app_host() {
+            // through explorer.exe: the page opens with the user's normal token even from the elevated bar
+            let explorer = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into())).join("explorer.exe");
+            if Command::new(explorer).arg(&uri).stdin(Stdio::null()).spawn().is_ok() {
+                return;
+            }
+        }
+        // no Store app host on this Windows: Explorer for the time Settings is open (seconds, and its desktop shows).
+        // `uri` is passed through the environment, never spliced into the script.
+        let ps = PS.replace("__START_EXPLORER__", crate::shell::START_EXPLORER_PS);
+        let _ = Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps])
+            .env("WR_URI", &uri).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(0x0800_0000).spawn();
+    })
 }
 
 #[cfg(test)]

@@ -34,7 +34,7 @@ use windows_sys::Win32::{
     Foundation::*,
     Globalization::{GetDateFormatW, GetLocaleInfoW, GetTimeFormatW},
     Graphics::{
-        Dwm::{DwmFlush, DwmGetWindowAttribute},
+        Dwm::DwmGetWindowAttribute,
         Gdi::*,
         GdiPlus::{
             FillModeAlternate, GdipAddPathArc, GdipClosePathFigure, GdipCreateFromHDC, GdipCreatePath, GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics, GdipDeletePath, GdipFillPath, GdipSetPixelOffsetMode,
@@ -118,7 +118,6 @@ const VOLKEY: u32 = WM_APP + 14; // posted by the keyboard hook: a volume key (w
 const SNIP: u32 = WM_APP + 13; // posted by the keyboard hook: PrtSc / Win+Shift+S with no explorer to handle them
 const NEXT_LANG: u32 = WM_APP + 15; // posted by the keyboard hook: Win+Space with no explorer to handle it
 const STYLE_MENU: u32 = WM_APP + 16; // posted by the empty-spot menu's "Bar style…" (wp: x to open the Style menu at)
-const CLOSE_FLY: u32 = WM_APP + 17; // sent by the keyboard hook before a screen capture: close the open panel at once
 static EXPLORER_UP: AtomicBool = AtomicBool::new(true); // explorer's taskbar exists (it handles PrtSc itself then); refreshed by the bar
 
 struct Pin {
@@ -880,8 +879,8 @@ unsafe fn set_state(hwnd: HWND, state: usize) {
 /// Makes the bar the desktop's "taskman" window and a shell hook window (what explorer's taskbar is). Only without explorer:
 /// explorer takes the role at its start only when it is free, and without it Store apps never leave their splash screen.
 unsafe fn be_taskman(hwnd: HWND) {
-    if hwnd.is_null() {
-        return; // SetTaskmanWindow(NULL) would clear the role
+    if hwnd.is_null() || winrust_common::shell::app_host_up() {
+        return; // SetTaskmanWindow(NULL) would clear the role; a running Store app host keeps its own
     }
     if let Some(f) = GetProcAddress(GetModuleHandleW(wide("user32.dll").as_ptr()), b"SetTaskmanWindow\0".as_ptr()) {
         std::mem::transmute::<_, unsafe extern "system" fn(HWND) -> i32>(f)(hwnd);
@@ -1676,8 +1675,12 @@ fn refresh() {
         // (the first refresh runs at start before BAR is set: the start itself does both then)
         let bar = BAR.load(Relaxed) as HWND;
         if EXPLORER_UP.swap(up, Relaxed) && !up && !bar.is_null() {
-            place(bar); // Explorer (started for Settings) is gone and took the reserved strip with it
-            be_taskman(bar); // and its taskman role (freed for it before it started: winrust_common::shell)
+            place(bar); // Explorer is gone (rs-shell ends it after sign-in) and took the reserved strip with it
+            be_taskman(bar); // and its taskman role; the Store app host takes it over when it starts
+        }
+        // without Explorer, keep Windows' Store app host up (Settings, Calculator... show only with it), also after a crash
+        if !up && !bar.is_null() && n % 20 == 0 && !winrust_common::shell::app_host_up() {
+            thread::spawn(winrust_common::shell::ensure_app_host);
         }
         if TAPPS.with_borrow(|t| t.is_empty()) && n % 8 == 4 {
             announce(); // no icons yet (apps started before us, or explorer restarted): ask them to register again
@@ -2032,12 +2035,10 @@ unsafe extern "system" fn kb_hook(n: i32, w: WPARAM, l: LPARAM) -> LRESULT {
                         keybd_event(0xE8, 0, KEYEVENTF_KEYUP, 0);
                         // A capture tool of the user's own (Screenshot OCR...) may watch Win+Shift+S with its own hook; one
                         // installed before ours is called after ours. It is offered the key first, and our clipper only runs
-                        // when nobody takes it. An open Start (this elevated bar in front) would end up in its frozen screen
-                        // and keep the tool's overlay from taking the foreground: close it first and let any process take it.
-                        let mut r = 0usize;
-                        if SendMessageTimeoutW(BAR.load(Relaxed) as HWND, CLOSE_FLY, 0, 0, SMTO_ABORTIFHUNG, 150, &mut r) != 0 && r == 1 {
-                            DwmFlush(); // the panel is off the screen before anyone copies it
-                        }
+                        // when nobody takes it. With Start open this elevated bar is in front, and a normal-rights app may not
+                        // take the foreground from it (no AttachThreadInput across integrity levels): its overlay could not
+                        // come up. As the foreground process we may hand that right on. Start stays as it is, so the frozen
+                        // screen shows it, and closes under the overlay once that takes the focus.
                         AllowSetForegroundWindow(ASFW_ANY);
                         if CallNextHookEx(null_mut(), n, w, l) != 0 {
                             return 1; // another app took it
@@ -2628,23 +2629,29 @@ unsafe fn open(path: &[u16]) {
     if p.to_lowercase().ends_with(".lnk") {
         bump(&p);
     }
-    if p.to_lowercase().starts_with("ms-settings:") {
-        return winrust_common::settings::open(&p); // needs Explorer as shell: it is started for the time Settings is open
+    // Settings (a page, or the app itself from Start or a pin): Windows' Settings needs a Store app host, started if missing
+    let settings = if p.to_lowercase().starts_with("ms-settings:") {
+        winrust_common::settings::open(&p)
+    } else if p.eq_ignore_ascii_case(crate::winset::SETTINGS_APP) {
+        Some(winrust_common::settings::open_windows("ms-settings:"))
+    } else {
+        None
+    };
+    if settings.is_some() || p.to_lowercase().starts_with("ms-settings:") {
+        if let Some(t) = settings.filter(|_| OPEN_WAIT.load(Relaxed)) {
+            let _ = t.join(); // `topbar --open`: the process must not end before the launch did
+        }
+        return;
     }
-    if p.eq_ignore_ascii_case(crate::winset::SETTINGS_APP) {
-        // the Settings app itself (Start, a pin): Windows' Settings, which needs the same Explorer start as its pages
-        return winrust_common::settings::open_windows("ms-settings:");
-    }
-    // A Store (MSIX) app from the Apps folder: "explorer.exe shell:AppsFolder\<AUMID>" fails with "Class not registered"
-    // when explorer is not the running shell (rs-shell). Then the activation service starts it directly and needs no
-    // explorer (packaged desktop apps like 1Password run fine). Only then: activated from this elevated bar, a UWP app
-    // (Calculator) hangs on its splash screen, so with explorer as the shell it goes the usual way below.
-    // On its own thread: activation waits until the app has started.
+    // A Store (MSIX) app from the Apps folder. A UWP app (Calculator) only shows while a Store app host runs (Explorer or
+    // ShellAppRuntime: winrust_common::shell::ensure_app_host), and "explorer.exe shell:AppsFolder\<AUMID>" fails with
+    // "Class not registered" without one. So without Explorer the host is made sure of first; with no host at all the
+    // activation service still starts packaged desktop apps (1Password). On its own thread: both may wait.
     let aumid = p.get(..17).filter(|h| h.eq_ignore_ascii_case(r"shell:AppsFolder\")).and(p.get(17..)).filter(|a| a.contains('!'));
     if let Some(aumid) = aumid.filter(|_| !EXPLORER_UP.load(Relaxed)) {
         let (aumid, p) = (aumid.to_string(), p.clone());
         let t = thread::spawn(move || unsafe {
-            if !activate_app(&aumid) {
+            if winrust_common::shell::ensure_app_host() || !activate_app(&aumid) {
                 open_via_explorer(&p);
             }
         });
@@ -3299,11 +3306,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         SNIP if wp == 1 => screenshot_notice(hwnd),
         SNIP if wp == 2 => clip_notice(hwnd),
         SNIP => clip::start(),
-        CLOSE_FLY => {
-            let open = fly::any_open();
-            fly::close_now();
-            return open as LRESULT;
-        }
         STYLE_MENU => style_menu(wp as i32),
         NEXT_LANG => {
             // Win+Space without explorer: the next input language, named in a tip over the bar (there is no button for it)
@@ -3571,6 +3573,7 @@ fn main() {
         // and gets us HSHELL_GETMINRECT. Only when explorer's taskbar is absent: with it running its own registration stays.
         if find_other("Shell_TrayWnd").is_null() {
             be_taskman(hwnd);
+            thread::spawn(winrust_common::shell::ensure_app_host); // Store apps (Settings, Calculator) show only with it
         }
         hide_taskbar();
         place(hwnd);
