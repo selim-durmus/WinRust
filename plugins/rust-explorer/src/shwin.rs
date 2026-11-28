@@ -4,7 +4,7 @@
 //! with the folder, waits for a window showing it to appear in that list (20 s, then gives up), and asks its view
 //! to select the item. Without it the item was never selected and the caller hung for 20 s.
 
-use std::{cell::RefCell, ffi::c_void, os::windows::ffi::OsStrExt, path::{Path, PathBuf}, ptr, sync::{Mutex, MutexGuard}};
+use std::{cell::{Cell, RefCell}, ffi::c_void, mem::ManuallyDrop, os::windows::ffi::OsStrExt, path::{Path, PathBuf}, ptr, sync::{Mutex, MutexGuard}};
 use windows::{core::*, Win32::{Foundation::*, System::{Com::*, Ole::*, Variant::*}, UI::{Controls::*, Shell::{Common::ITEMIDLIST, *}, WindowsAndMessaging::*}}};
 
 /// Posted to the window: wp 0 = put the window in the shell's list / tell it the new folder, 1 = select what the
@@ -14,9 +14,16 @@ pub const WM_SHWIN: u32 = WM_APP + 11;
 /// The service of a browser that is its folder view (not in the windows crate).
 const SID_SFOLDERVIEW: GUID = GUID::from_u128(0xcde725b0_ccc9_4519_917e_325d72fab4ce);
 
+type Reg = (IShellWindows, IDispatch, Vec<i32>);
+
 thread_local! {
-    // the shell's list, our window's object in it and its entries (one per id of the folder, see `update`)
-    static REG: RefCell<Option<(IShellWindows, IDispatch, Vec<i32>)>> = const { RefCell::new(None) };
+    // the shell's list, our window's object in it and its entries (one per id of the folder, see `update`).
+    // ManuallyDrop: never released by the thread-local's destructor. That runs inside ExitProcess, after every other
+    // thread is gone, COM's included; releasing the list (a proxy to another process) then waits for a reply that
+    // never comes. The process hung there for good, keeping its exe locked, and could not be killed (it was already
+    // exiting). `gone` releases it while the window still works.
+    static REG: RefCell<Option<ManuallyDrop<Reg>>> = const { RefCell::new(None) };
+    static CLOSED: Cell<bool> = const { Cell::new(false) }; // the window closes: no new entries (gone's calls let messages through)
 }
 
 // The shell calls our objects on its own threads (windows-rs objects are agile), so what they share with the
@@ -63,14 +70,14 @@ pub fn update(h: *mut c_void) {
         unsafe { ILFree(Some(p)) };
         if !locs.contains(&b) { locs.push(b); }
     }
-    if locs.is_empty() { return; }
+    if locs.is_empty() || CLOSED.get() { return; }
     if REG.with_borrow(|r| r.is_none()) {
         let Ok(sw) = (unsafe { CoCreateInstance::<_, IShellWindows>(&ShellWindows, None, CLSCTX_ALL) }) else { return };
         let Ok(disp) = IWebBrowser2::from(Browser { hwnd: h as isize }).cast::<IDispatch>() else { return };
-        REG.set(Some((sw, disp, vec![])));
+        REG.set(Some(ManuallyDrop::new((sw, disp, vec![]))));
     }
     // (no borrow held across the calls: they let messages through)
-    let Some((sw, disp, mut cookies)) = REG.with_borrow(|r| r.clone()) else { return };
+    let Some((sw, disp, mut cookies)) = REG.with_borrow(|r| r.as_deref().cloned()) else { return };
     while cookies.len() < locs.len() {
         // the folder first (pending), then the window: a "Show in folder" that started us waits for the window's
         // registration and looks at its folder right then, so the folder must already be there (as Explorer does)
@@ -93,9 +100,13 @@ pub fn update(h: *mut c_void) {
     REG.with_borrow_mut(|r| if let Some(r) = r { r.2 = cookies; });
 }
 
-/// The window closes: out of the shell's list.
+/// The window closes (WM_DESTROY): out of the shell's list, and the list released.
 pub fn gone() {
-    if let Some((sw, _, cookies)) = REG.take() { for c in cookies { unsafe { let _ = sw.Revoke(c); } } }
+    CLOSED.set(true);
+    if let Some(r) = REG.take() {
+        let (sw, _, cookies) = ManuallyDrop::into_inner(r);
+        for c in cookies { unsafe { let _ = sw.Revoke(c); } }
+    }
 }
 
 /// The names the shell asked to select in the shown folder (WM_SHWIN wp 1), if any.

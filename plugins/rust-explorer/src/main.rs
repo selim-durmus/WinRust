@@ -2272,6 +2272,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                 if p.y < ui::sc(ui::TAB_H) { HTCAPTION as isize } else { r }
             }
             WM_DESTROY if !desk() => {
+                shwin::gone(); // out of the shell's list while COM still works (see shwin::REG)
                 save_session();
                 CRAWL.with_borrow(|c| if let Some(c) = c { c.stop() });
                 WATCH_GEN.fetch_add(1, Relaxed);
