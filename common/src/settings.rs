@@ -5,7 +5,7 @@
 use std::{os::windows::process::CommandExt, process::{Command, Stdio}};
 
 const PS: &str = r#"
-Add-Type -Namespace W -Name U -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern System.IntPtr GetShellWindow(); [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr h, out uint p); [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern System.IntPtr FindWindowEx(System.IntPtr p, System.IntPtr a, string c, string t); [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern System.IntPtr GetWindow(System.IntPtr h, uint c); [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetForegroundWindow(System.IntPtr h); [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h, int c); [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, uint f, System.UIntPtr e);'
+Add-Type -Namespace W -Name U -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern System.IntPtr GetShellWindow(); [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr h, out uint p); [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern System.IntPtr FindWindowEx(System.IntPtr p, System.IntPtr a, string c, string t); [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern System.IntPtr GetWindow(System.IntPtr h, uint c); [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetForegroundWindow(System.IntPtr h); [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h, int c); [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, uint f, System.UIntPtr e); [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool IsIconic(System.IntPtr h);'
 function ExplorerShell { $h=[W.U]::GetShellWindow(); if($h -eq [IntPtr]::Zero){return $false}; $p=0; [void][W.U]::GetWindowThreadProcessId($h,[ref]$p); (Get-Process -Id $p -ErrorAction SilentlyContinue).Name -eq 'explorer' }
 function ExplorerTray { $h=[W.U]::GetShellWindow(); if($h -eq [IntPtr]::Zero){return $false}; $sp=0; [void][W.U]::GetWindowThreadProcessId($h,[ref]$sp); $t=[IntPtr]::Zero
   while(($t=[W.U]::FindWindowEx([IntPtr]::Zero,$t,'Shell_TrayWnd',$null)) -ne [IntPtr]::Zero){ $tp=0; [void][W.U]::GetWindowThreadProcessId($t,[ref]$tp); if($tp -eq $sp){return $true} }
@@ -14,6 +14,8 @@ function ExplorerTray { $h=[W.U]::GetShellWindow(); if($h -eq [IntPtr]::Zero){re
 function Raise { $sp=(Get-Process SystemSettings -ErrorAction SilentlyContinue | Select-Object -First 1).Id; if(-not $sp){return}; $c=[IntPtr]::Zero
   while(($c=[W.U]::FindWindowEx([IntPtr]::Zero,$c,'Windows.UI.Core.CoreWindow',$null)) -ne [IntPtr]::Zero){ $cp=0; [void][W.U]::GetWindowThreadProcessId($c,[ref]$cp)
     if($cp -eq $sp){ $o=[W.U]::GetWindow($c,4); if($o -eq [IntPtr]::Zero){$o=$c}; [W.U]::keybd_event(0x12,0,0,[UIntPtr]::Zero); [W.U]::keybd_event(0x12,0,2,[UIntPtr]::Zero); [void][W.U]::ShowWindow($o,9); [void][W.U]::SetForegroundWindow($o); return } } }
+# minimized, a Store app is suspended by Windows and stops answering: that is not a hang
+function Minimized { $f=[IntPtr]::Zero; while(($f=[W.U]::FindWindowEx([IntPtr]::Zero,$f,'ApplicationFrameWindow','Settings')) -ne [IntPtr]::Zero){ if([W.U]::IsIconic($f)){ return $true } }; $false }
 # a Settings process that hangs (opened before the shell was ready) swallows every later launch: it must go
 function KillStale { Get-Process SystemSettings -ErrorAction SilentlyContinue | Where-Object { -not $_.Responding } | Stop-Process -Force }
 KillStale
@@ -40,7 +42,7 @@ for($try=0;$try -lt 2;$try++){
 if($started){
   # ends when Settings is closed, or when it hangs for good
   $bad=0
-  while($bad -lt 5 -and (Get-Process SystemSettings -ErrorAction SilentlyContinue)){ Start-Sleep -Seconds 2; if(Get-Process SystemSettings -ErrorAction SilentlyContinue | Where-Object { -not $_.Responding }){ $bad++ } else { $bad=0 } }
+  while($bad -lt 5 -and (Get-Process SystemSettings -ErrorAction SilentlyContinue)){ Start-Sleep -Seconds 2; if((Get-Process SystemSettings -ErrorAction SilentlyContinue | Where-Object { -not $_.Responding }) -and -not (Minimized)){ $bad++ } else { $bad=0 } }
   KillStale
   Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Where-Object { $_.CommandLine -match '(?i)explorer\.exe"?(\s+/NoUACCheck)?\s*$' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
   $rx="$env:ProgramFiles\rust-explorer\rust-explorer.exe"

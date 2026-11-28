@@ -6,10 +6,18 @@
 //! through it (Calculator...) open suspended and hidden. A one-shot scheduled task with RunLevel Limited for the
 //! interactive user gets the normal sign-in token (TokenElevationType 3) whoever starts it, admin or not. The task is
 //! removed right after it started; Explorer keeps running. If the task cannot be made, runas is the fallback.
+//!
+//! The topbar, started while Explorer was away, is the desktop's "taskman" window (SetTaskmanWindow: minimized windows
+//! need one). Explorer only takes that role at its start if it is free; without it Explorer's app-view host never shows a
+//! Store app: Settings, Calculator... stay suspended on their splash screen. So the role is freed right before the start
+//! (the bar takes it back when Explorer leaves).
 use std::{os::windows::process::CommandExt, process::{Command, Stdio}};
 
 /// PowerShell that starts Explorer as described above (paste into a script, or run with `start_explorer`).
 pub const START_EXPLORER_PS: &str = r#"
+Add-Type -Namespace WR -Name Tm -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern System.IntPtr GetTaskmanWindow(); [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetTaskmanWindow(System.IntPtr h); [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr h, out uint p);'
+$tm=[WR.Tm]::GetTaskmanWindow(); $tp=0
+if($tm -ne [IntPtr]::Zero -and [WR.Tm]::GetWindowThreadProcessId($tm,[ref]$tp) -and (Get-Process -Id $tp -ErrorAction SilentlyContinue).Name -ne 'explorer'){ [void][WR.Tm]::SetTaskmanWindow([IntPtr]::Zero) }
 $u=(Get-CimInstance Win32_ComputerSystem).UserName; if(-not $u){ $u=[Security.Principal.WindowsIdentity]::GetCurrent().Name }
 $n='winrust-explorer-'+[guid]::NewGuid().ToString('N').Substring(0,8)
 try {
